@@ -1,0 +1,23 @@
+﻿Metric,Value
+Documents Analyzed,864
+References Analyzed,17252
+Execution Time (seconds),3145.52
+References Linked in Scopus (scopus_link_valid),9069
+References Unlinked in Scopus,8183
+References with Resolving DOI,9828
+Valid Correct (VALID_CORRECT),4062
+Valid Redirect Correct (VALID_REDIRECT_CORRECT),0
+VALID DOI BUT WRONG REFERENCE (VALID_DOI_WRONG_REFERENCE),0
+Scopus Linked without DOI (SCOPUS_LINKED_NO_DOI),972
+Scopus Unlinked (SCOPUS_UNLINKED),5236
+Invalid DOI (INVALID_DOI),0
+Broken URL (BROKEN_URL),74
+Access Restricted / Paywall (ACCESS_RESTRICTED),3836
+Missing DOI - Recovered (DOI_RECOVERED),2501
+Missing DOI - Uncertain (DOI_RECOVERY_UNCERTAIN),152
+Missing DOI - Unrecovered (DOI_MISSING),414
+Metadata Mismatch (METADATA_MISMATCH),0
+Retracted Publication (RETRACTED_REFERENCE),0
+Ambiguous (AMBIGUOUS),0
+Unverified (UNVERIFIED),5
+Cases Requiring Human Review,7415

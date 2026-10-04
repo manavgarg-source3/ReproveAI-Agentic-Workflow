@@ -1,0 +1,17 @@
+.env
+.venv/
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.sqlite
+*.sqlite3
+cache/
+data/intermediate/
+data/output/
+outputs/
+scratch/
+.pytest_cache/
+
+
