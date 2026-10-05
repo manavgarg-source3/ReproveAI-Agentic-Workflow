@@ -1,7 +1,7 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useRef, useState } from "react";
-import { AnalysisResponse, analyzePaper, Artifact, ArtifactFile, Claim, ClaimEvidenceAssessment, EvidenceItem, Experiment, ExperimentArtifactMap, Reference, ReferenceValidation } from "@/lib/api";
+import { ChangeEvent, DragEvent, useRef, useState, useEffect } from "react";
+import { AnalysisResponse, analyzePaper, analyzeEnvironment, Artifact, ArtifactFile, Claim, ClaimEvidenceAssessment, EvidenceItem, Experiment, ExperimentArtifactMap, Reference, ReferenceValidation, EnvironmentSpecification } from "@/lib/api";
 
 function UploadIcon() {
   return <svg aria-hidden="true" viewBox="0 0 24 24" className="h-6 w-6" fill="none"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 15.5v2A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>;
@@ -201,6 +201,47 @@ function ArtifactReadinessResults({ experiments, artifacts, files, maps }: { exp
   </div>;
 }
 
+function EnvironmentReconstructionResults({ envs, experiments, artifacts }: { envs: EnvironmentSpecification[]; experiments: Experiment[]; artifacts: Artifact[] }) {
+  if (!envs || !envs.length) return null;
+  const experimentsById = new Map(experiments.map(e => [e.id, e]));
+  const artifactsById = new Map(artifacts.map(a => [a.artifact_id, a]));
+  
+  return (
+    <div className="mt-7 border-t border-slate-200 pt-6">
+      <div>
+        <p className="text-[0.68rem] font-bold uppercase tracking-[0.14em] text-indigo-700">Environment Reconstruction</p>
+        <p className="mt-1 text-xs leading-5 text-slate-500">Documented environment specification extracted via repository metadata.</p>
+      </div>
+      <div className="mt-4 grid gap-4">
+        {envs.map(env => {
+          const exp = env.experiment_id ? experimentsById.get(env.experiment_id) : null;
+          const art = env.artifact_id ? artifactsById.get(env.artifact_id) : null;
+          
+          return (
+            <article key={env.environment_id} className="readiness-card">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="text-xs font-semibold text-slate-500">{env.experiment_id ?? "Global Environment"} A {art?.name ?? "Repository artifact"}</p>
+                  <h4 className="mt-1 text-sm font-semibold text-slate-950">{exp?.objective ?? "Artifact Environment Mapping"}</h4>
+                </div>
+                <span className={`artifact-badge ${env.status === 'RECONSTRUCTED' ? 'artifact-verified' : env.status === 'BLOCKED' || env.status === 'UNKNOWN' ? 'artifact-missing' : 'artifact-review'}`}>{env.status.replaceAll("_", " ")}</span>
+              </div>
+              <div className="mt-4 grid gap-x-3 gap-y-2 text-xs leading-5 sm:grid-cols-2 text-slate-600">
+                <p><span className="font-semibold text-slate-800">Python:</span> {env.python_constraint ?? "UNKNOWN"}</p>
+                <p><span className="font-semibold text-slate-800">Frameworks:</span> {env.frameworks.length ? env.frameworks.join(", ") : "None detected"}</p>
+                <p><span className="font-semibold text-slate-800">GPU:</span> {env.gpu ?? "UNKNOWN"}</p>
+                <p><span className="font-semibold text-slate-800">CUDA:</span> {env.cuda_version ?? "UNKNOWN"}</p>
+                <p><span className="font-semibold text-slate-800">Dependencies:</span> {env.dependencies.length ? `${env.dependencies.length} packages found` : "None found"}</p>
+                <p><span className="font-semibold text-slate-800">Env Vars:</span> {env.environment_variables.length ? `${env.environment_variables.length} (${env.environment_variables.filter(v => v.secret).length} secret)` : "None found"}</p>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function Results({ result }: { result: AnalysisResponse }) {
   const { paper, claims, experiments, methods, references } = result.analysis;
   return (
@@ -248,19 +289,57 @@ function Results({ result }: { result: AnalysisResponse }) {
           </div>
           <div className="mt-5"><ArtifactDiscoveryResults items={result.artifacts} /></div>
           <ArtifactReadinessResults experiments={experiments} artifacts={result.artifacts} files={result.artifact_files} maps={result.experiment_artifact_maps} />
+          <EnvironmentReconstructionResults envs={result.environment_specifications} experiments={experiments} artifacts={result.artifacts} />
         </article>
       </div>
     </section>
   );
 }
 
+const loadingMessages = [
+  "Extracting document text...",
+  "Step 1: Analyzing sections with Gemini...",
+  "Step 2: Extracting scientific claims and experiments...",
+  "Step 3: Validating scholarly citations... (Wait for a few minutes)",
+  "Step 4: Cross-referencing evidence locations...",
+  "Finalizing analysis... please wait"
+];
+
 export default function Home() {
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [file, setFile] = useState<File | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<AnalysisResponse | null>(null);
+    const inputRef = useRef<HTMLInputElement>(null);
+    const [file, setFile] = useState<File | null>(null);
+    const [isDragging, setIsDragging] = useState(false);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [result, setResult] = useState<AnalysisResponse | null>(null);
+    const [isLoadingEnv, setIsLoadingEnv] = useState(false);
+    
+    const [elapsedSeconds, setElapsedSeconds] = useState(0);
+    const [loadingIndex, setLoadingIndex] = useState(0);
+    useEffect(() => {
+      let interval: ReturnType<typeof setInterval> | undefined;
+      if (isLoading) {
+        interval = setInterval(() => {
+          setElapsedSeconds(prev => prev + 1);
+          setLoadingIndex(prev => {
+            // we don't have elapsedSeconds easily here without adding it to deps which would reset interval
+            return prev; // We'll update it separately below
+          });
+        }, 1000);
+      }
+      return () => {
+        if (interval) clearInterval(interval);
+      };
+    }, [isLoading]);
+    
+    // Separate effect for message updating based on elapsedSeconds
+    useEffect(() => {
+      if (isLoading && elapsedSeconds > 0 && elapsedSeconds % 15 === 0) {
+        setLoadingIndex(prev => (prev < loadingMessages.length - 1 ? prev + 1 : prev));
+      }
+    }, [elapsedSeconds, isLoading]);
+
+
 
   function selectFile(nextFile: File | undefined) {
     setError(null); setResult(null);
@@ -272,13 +351,46 @@ export default function Home() {
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) { selectFile(event.target.files?.[0]); }
   function handleDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); setIsDragging(false); selectFile(event.dataTransfer.files?.[0]); }
 
-  async function handleAnalyze() {
-    if (!file || isLoading) return;
-    setIsLoading(true); setError(null); setResult(null);
-    try { setResult(await analyzePaper(file)); }
-    catch (caughtError) { setError(caughtError instanceof Error ? caughtError.message : "Analysis failed. Please try again."); }
-    finally { setIsLoading(false); }
-  }
+  
+    const formatTime = (secs: number) => {
+      if (secs < 60) return `${secs}s`;
+      const m = Math.floor(secs / 60);
+      const s = secs % 60;
+      return `${m}m ${s}s`;
+    };
+
+    async function handleAnalyze() {
+      if (!file) return;
+      setIsLoading(true); setError(null); setResult(null); setLoadingIndex(0); setElapsedSeconds(0);
+      try {
+        const response = await analyzePaper(file, "citation");
+        setResult(response);
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : "An unknown error occurred.");
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    async function handleContinueAnalysis() {
+      if (!result || !result.paper_text) return;
+      setIsLoadingEnv(true); setError(null);
+      try {
+        const envResponse = await analyzeEnvironment(result.analysis, result.paper_text);
+        setResult({
+          ...result,
+          artifacts: envResponse.artifacts,
+          artifact_files: envResponse.artifact_files,
+          experiment_artifact_maps: envResponse.experiment_artifact_maps,
+          environment_specifications: envResponse.environment_specifications
+        });
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : "An unknown error occurred.");
+      } finally {
+        setIsLoadingEnv(false);
+      }
+    }
+
 
   return (
     <main className="min-h-screen overflow-hidden">
@@ -303,11 +415,29 @@ export default function Home() {
           </div>
           {file && <div className="mt-4 flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-600"><FileIcon /></span><div className="min-w-0"><p className="truncate text-sm font-semibold text-slate-900">{file.name}</p><p className="text-xs text-slate-500">{(file.size / 1024 / 1024).toFixed(2)} MB</p></div></div>
-            <button type="button" onClick={handleAnalyze} disabled={isLoading} className="primary-button">{isLoading ? <><span className="spinner" />Analyzing paper…</> : "Analyze paper"}</button>
+            <button type="button" onClick={handleAnalyze} disabled={isLoading} className="primary-button">{isLoading ? <><span className="spinner" />{loadingMessages[loadingIndex]} ({formatTime(elapsedSeconds)})</> : "Analyze paper"}</button>
           </div>}
           {error && <div role="alert" className="mt-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
         </section>
-        {result && <Results result={result} />}
+        
+        
+        {result && (
+          <>
+            <Results result={result} />
+            {(!result.artifacts || !result.artifacts.length) && !isLoadingEnv && (
+              <div className="mt-8 text-center">
+                <button onClick={handleContinueAnalysis} className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
+                  Continue Analyzing Environments & Artifacts
+                </button>
+              </div>
+            )}
+            {isLoadingEnv && (
+              <div className="mt-8 text-center">
+                <p className="text-sm font-medium text-slate-500">Extracting and reconstructing environments...</p>
+              </div>
+            )}
+          </>
+        )}
         <footer className="mt-20 border-t border-slate-200 pt-6 text-center text-xs leading-5 text-slate-500">Results are extracted from the paper by the Research Analyzer. Author-reported claims are not independently verified.</footer>
       </div>
     </main>

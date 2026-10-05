@@ -328,7 +328,80 @@ class AnalysisContextDiagnostics(StrictModel):
     fallback_used: bool = False
 
 
+class EnvironmentStatus(str, Enum):
+    RECONSTRUCTED = "RECONSTRUCTED"
+    PARTIALLY_RECONSTRUCTED = "PARTIALLY_RECONSTRUCTED"
+    BLOCKED = "BLOCKED"
+    UNKNOWN = "UNKNOWN"
+
+class DependencyType(str, Enum):
+    PYTHON_PACKAGE = "PYTHON_PACKAGE"
+    SYSTEM_PACKAGE = "SYSTEM_PACKAGE"
+    FRAMEWORK = "FRAMEWORK"
+    DRIVER = "DRIVER"
+    TOOL = "TOOL"
+    OTHER = "OTHER"
+
+class Certainty(str, Enum):
+    EXPLICIT = "EXPLICIT"
+    INFERRED = "INFERRED"
+    UNKNOWN = "UNKNOWN"
+
+class EnvironmentDependency(StrictModel):
+    name: str
+    version_constraint: str | None = None
+    dependency_type: DependencyType
+    source_path: str | None = None
+    evidence: str | None = None
+    certainty: Certainty
+
+class EnvironmentVariableRequirement(StrictModel):
+    name: str
+    required: bool = True
+    secret: bool = False
+    source_path: str | None = None
+    evidence: str | None = None
+    notes: str | None = None
+
+class EnvironmentConfiguration(StrictModel):
+    path: str
+    type: str | None = None
+    experiment_id: str | None = None
+    purpose: str | None = None
+    evidence: str | None = None
+    relevance_status: str | None = None
+
+class EnvironmentSpecification(StrictModel):
+    environment_id: str
+    experiment_id: str | None = None
+    artifact_id: str | None = None
+    status: EnvironmentStatus
+    operating_system: str | None = None
+    operating_system_version: str | None = None
+    python_version: str | None = None
+    python_constraint: str | None = None
+    frameworks: list[str] = Field(default_factory=list)
+    dependencies: list[EnvironmentDependency] = Field(default_factory=list)
+    cuda_version: str | None = None
+    cudnn_version: str | None = None
+    gpu: str | None = None
+    gpu_memory: str | None = None
+    cpu: str | None = None
+    memory: str | None = None
+    storage: str | None = None
+    environment_variables: list[EnvironmentVariableRequirement] = Field(default_factory=list)
+    configuration_files: list[EnvironmentConfiguration] = Field(default_factory=list)
+    container: str | None = None
+    documented_commands: list[str] = Field(default_factory=list)
+    system_dependencies: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    confidence: str | None = None
+    notes: list[str] = Field(default_factory=list)
+    conflict_detected: bool = False
+    conflicting_evidence: list[str] = Field(default_factory=list)
+
 class AnalyzePaperResponse(StrictModel):
+    paper_text: str | None = None
     success: bool = True
     analysis: ResearchAnalysis
     reference_validation: list[ReferenceValidation] = Field(default_factory=list)
@@ -337,5 +410,6 @@ class AnalyzePaperResponse(StrictModel):
     artifacts: list[Artifact] = Field(default_factory=list)
     artifact_files: list[ArtifactFile] = Field(default_factory=list)
     experiment_artifact_maps: list[ExperimentArtifactMap] = Field(default_factory=list)
+    environment_specifications: list[EnvironmentSpecification] = Field(default_factory=list)
     analysis_context: AnalysisContextDiagnostics | None = None
     extraction: ExtractionDiagnostics

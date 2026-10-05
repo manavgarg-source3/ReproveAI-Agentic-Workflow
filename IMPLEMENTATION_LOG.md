@@ -840,3 +840,10 @@ Ran `npm run build` completely outside the sandbox. The exact same `TurbopackInt
 - All 96 core tests (Step 1-3) pass cleanly.
 - Scientometric Engine source code is verified untouched.
 - No execution primitives (subprocess, docker, os.system) exist in the artifact services.
+
+## STEP 4: Environment Reconstruction
+- Reconstructed environment specifications from dependency files (requirements.txt, pyproject.toml, etc.) and documentation (README, Dockerfiles).
+- Parsers designed using deterministic string and regex operations without relying on execution.
+- Distinguishes explicitly stated requirements from inferred ones.
+- Safely extracts environment variables (hiding secrets).
+- Enforces no execution and no installation boundaries.

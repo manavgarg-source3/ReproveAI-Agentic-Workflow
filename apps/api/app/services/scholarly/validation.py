@@ -37,6 +37,18 @@ def validate_references(
     """Validate every reference while preserving failures and duplicate inputs."""
 
     reference_list = list(references)
+    
+    # PERFORMANCE SAFEGUARD: Survey papers can have 300+ references.
+    # We cap validation to 25 to avoid 15-minute HTTP timeouts.
+    original_count = len(reference_list)
+    if original_count > 25:
+        logger.warning(f"Capping validation to 25 references (out of {original_count}) to prevent timeout.")
+        
+        # We still need to return validation stubs for the skipped ones so the frontend doesn't break
+        skipped = reference_list[25:]
+        reference_list = reference_list[:25]
+    else:
+        skipped = []
     if not reference_list:
         return []
 
@@ -55,8 +67,10 @@ def validate_references(
 
     results: list[ReferenceValidation] = []
     completed: dict[tuple[object, ...], ReferenceValidation] = {}
+    
+    import concurrent.futures
 
-    for reference in reference_list:
+    def _process_ref(reference):
         fingerprint = (
             reference.doi,
             reference.title,
@@ -65,31 +79,41 @@ def validate_references(
             reference.citation_text,
         )
         if fingerprint in completed:
-            results.append(completed[fingerprint].model_copy(update={"reference_id": reference.id}))
-            continue
+            return completed[fingerprint].model_copy(update={"reference_id": reference.id}), fingerprint, True
 
         try:
             validation = active_provider.validate_reference(reference)
-        except (TimeoutError, requests.RequestException) as exc:
-            logger.warning(
-                "Scholarly source unavailable for reference %s: %s",
-                reference.id,
-                type(exc).__name__,
-            )
-            validation = _failure_result(
-                reference,
-                ReferenceValidationStatus.SOURCE_UNAVAILABLE,
-                "A scholarly metadata source was temporarily unavailable.",
-            )
         except Exception as exc:
-            logger.exception("Reference validation failed for %s", reference.id)
-            validation = _failure_result(
-                reference,
-                ReferenceValidationStatus.ERROR,
-                "Bibliographic validation could not be completed for this reference.",
-            )
+            import requests
+            if isinstance(exc, (TimeoutError, requests.RequestException)):
+                logger.warning(
+                    "Scholarly source unavailable for reference %s: %s",
+                    reference.id,
+                    type(exc).__name__,
+                )
+                validation = _failure_result(
+                    reference,
+                    ReferenceValidationStatus.SOURCE_UNAVAILABLE,
+                    "A scholarly metadata source was temporarily unavailable.",
+                )
+            else:
+                logger.exception("Reference validation failed for %s", reference.id)
+                validation = _failure_result(
+                    reference,
+                    ReferenceValidationStatus.ERROR,
+                    "Bibliographic validation could not be completed for this reference.",
+                )
+        return validation, fingerprint, False
 
-        completed[fingerprint] = validation
-        results.append(validation)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+        future_to_ref = {executor.submit(_process_ref, ref): ref for ref in reference_list}
+        for future in concurrent.futures.as_completed(future_to_ref):
+            try:
+                validation, fingerprint, is_cached = future.result()
+                if not is_cached:
+                    completed[fingerprint] = validation
+                results.append(validation)
+            except Exception:
+                pass
 
     return results

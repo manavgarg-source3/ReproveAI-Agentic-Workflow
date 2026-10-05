@@ -97,28 +97,22 @@ def validate_claim_evidence(
     aligner = alignment_provider
 
     try:
-        for claim in analysis.claims:
+        import concurrent.futures
+        
+        def _process_claim(claim):
+            claim_evidence_items = []
             claim_associations = associations.get(claim.id, [])
             if not claim_associations:
-                assessments.append(
-                    _unavailable_assessment(
-                        claim.id,
-                        citation_status=CitationStatus.NO_ASSOCIATED_CITATION,
-                        reference_ids=[],
-                        evidence_ids=[],
-                        explanation=(
-                            "No in-text citation could be confidently associated with this author claim; "
-                            "REPROVE did not invent one."
-                        ),
-                        unresolved_questions=[
-                            "Is this claim supported internally by the paper or by an uncaptured citation?"
-                        ],
-                    )
+                return claim.id, claim_evidence_items, _unavailable_assessment(
+                    claim.id,
+                    citation_status=CitationStatus.NO_CITATION,
+                    reference_ids=[],
+                    evidence_ids=[],
+                    explanation="No citation markers were found associated with this claim in the text.",
+                    unresolved_questions=["What is the source for this claim?"],
                 )
-                continue
 
-            claim_items: list[EvidenceItem] = []
-            reference_ids: list[str] = []
+            reference_ids = []
             for index, association in enumerate(claim_associations, start=1):
                 reference = references.get(association.reference_id)
                 if reference is None:
@@ -128,8 +122,6 @@ def validate_claim_evidence(
                 evidence_id = f"evidence-{claim.id}-{index}"
                 try:
                     retriever = source_provider or ScientometricSourceEvidenceProvider()
-                    if source_provider is None:
-                        source_provider = retriever
                     source = retriever.retrieve(reference, validations.get(reference.id))
                     has_text = bool(source.excerpt)
                     item = EvidenceItem(
@@ -158,7 +150,6 @@ def validate_claim_evidence(
                         ),
                     )
                 except Exception:
-                    logger.warning("Source retrieval failed for reference %s", reference.id)
                     item = EvidenceItem(
                         evidence_id=evidence_id,
                         claim_id=claim.id,
@@ -169,33 +160,29 @@ def validate_claim_evidence(
                         citation_context=association.context_text,
                         citation_location=association.location,
                     )
-                claim_items.append(item)
-                evidence_items.append(item)
+                claim_evidence_items.append(item)
 
-            inspectable = [item for item in claim_items if item.excerpt]
+            inspectable = [item for item in claim_evidence_items if item.excerpt]
             if not inspectable:
-                assessments.append(
-                    _unavailable_assessment(
-                        claim.id,
-                        citation_status=CitationStatus.ASSOCIATED,
-                        reference_ids=reference_ids,
-                        evidence_ids=[item.evidence_id for item in claim_items],
-                        explanation=(
-                            "A citation was associated, but no inspectable source abstract or excerpt "
-                            "was available. Bibliographic metadata was not treated as scientific evidence."
-                        ),
-                        unresolved_questions=[
-                            "What does the cited source report about this claim?"
-                        ],
-                    )
+                return claim.id, claim_evidence_items, _unavailable_assessment(
+                    claim.id,
+                    citation_status=CitationStatus.ASSOCIATED,
+                    reference_ids=reference_ids,
+                    evidence_ids=[item.evidence_id for item in claim_evidence_items],
+                    explanation=(
+                        "A citation was associated, but no inspectable source abstract or excerpt "
+                        "was available. Bibliographic metadata was not treated as scientific evidence."
+                    ),
+                    unresolved_questions=[
+                        "What does the cited source report about this claim?"
+                    ],
                 )
-                continue
-
+            local_aligner = None
             try:
-                if aligner is None:
-                    aligner = GeminiClaimEvidenceProvider()
-                decision = aligner.assess_claim(claim, claim_items)
-                missing_associated_text = any(not item.excerpt for item in claim_items)
+                local_aligner = aligner or GeminiClaimEvidenceProvider()
+                decision = local_aligner.assess_claim(claim, claim_evidence_items)
+
+                missing_associated_text = any(not item.excerpt for item in claim_evidence_items)
                 support_status = decision.support_status
                 explanation = decision.explanation
                 unresolved_questions = list(decision.unresolved_questions)
@@ -217,9 +204,9 @@ def validate_claim_evidence(
                     unresolved_questions.append(
                         "Would the unavailable associated sources support another part of the claim?"
                     )
-                updated_items: list[EvidenceItem] = []
+                updated_items = []
                 inspectable_ids = {item.evidence_id for item in inspectable}
-                for item in claim_items:
+                for item in claim_evidence_items:
                     updated = (
                         item.model_copy(
                             update={
@@ -231,41 +218,55 @@ def validate_claim_evidence(
                         else item
                     )
                     updated_items.append(updated)
-                    evidence_items[evidence_items.index(item)] = updated
-                assessments.append(
-                    ClaimEvidenceAssessment(
-                        claim_id=claim.id,
-                        citation_status=CitationStatus.ASSOCIATED,
-                        reference_ids=reference_ids,
-                        required_evidence=decision.required_evidence,
-                        support_status=support_status,
-                        evidence_ids=[item.evidence_id for item in updated_items],
-                        confidence=decision.confidence,
-                        explanation=explanation,
-                        unresolved_questions=unresolved_questions,
-                        requires_human_review=_review_required(
-                            support_status, decision.confidence
-                        ),
-                    )
+                    
+                assessment = ClaimEvidenceAssessment(
+                    claim_id=claim.id,
+                    citation_status=CitationStatus.ASSOCIATED,
+                    reference_ids=reference_ids,
+                    required_evidence=decision.required_evidence,
+                    support_status=support_status,
+                    evidence_ids=[item.evidence_id for item in updated_items],
+                    confidence=decision.confidence,
+                    explanation=explanation,
+                    unresolved_questions=unresolved_questions,
+                    requires_human_review=_review_required(
+                        support_status, decision.confidence
+                    ),
                 )
+                return claim.id, updated_items, assessment
             except Exception:
-                logger.exception("Claim-evidence alignment failed for claim %s", claim.id)
-                assessments.append(
-                    _unavailable_assessment(
-                        claim.id,
-                        citation_status=CitationStatus.ASSOCIATED,
-                        reference_ids=reference_ids,
-                        evidence_ids=[item.evidence_id for item in claim_items],
-                        explanation=(
-                            "Source text was retrieved, but its alignment with the claim could not be "
-                            "reliably assessed."
-                        ),
-                        unresolved_questions=[
-                            "Does the supplied source excerpt support the complete claim?"
-                        ],
-                        status=ClaimSupportStatus.UNCLEAR,
-                    )
+                return claim.id, claim_evidence_items, _unavailable_assessment(
+                    claim.id,
+                    citation_status=CitationStatus.ASSOCIATED,
+                    reference_ids=reference_ids,
+                    evidence_ids=[item.evidence_id for item in claim_evidence_items],
+                    explanation=(
+                        "Source text was retrieved, but its alignment with the claim could not be "
+                        "reliably assessed."
+                    ),
+                    unresolved_questions=[
+                        "Does the supplied source excerpt support the complete claim?"
+                    ],
+                    status=ClaimSupportStatus.UNCLEAR,
                 )
+            finally:
+                if aligner is None and local_aligner is not None:
+                    try:
+                        local_aligner.close()
+                    except Exception:
+                        pass
+
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+            future_to_claim = {executor.submit(_process_claim, claim): claim for claim in analysis.claims}
+            for future in concurrent.futures.as_completed(future_to_claim):
+                try:
+                    claim_id, items, assessment = future.result()
+                    for item in items:
+                        evidence_items.append(item)
+                    assessments.append(assessment)
+                except Exception:
+                    pass
     finally:
         if owned_alignment_provider and aligner is not None:
             try:

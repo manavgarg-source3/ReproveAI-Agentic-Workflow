@@ -269,3 +269,26 @@ class PublicRepositoryMetadataProvider:
             updated_at=metadata.get("last_activity_at"),
             notes=notes,
         )
+
+    def get_file_content(self, repository_url: str, path: str) -> str | None:
+        """Fetch the bounded content of a specific file."""
+        canonical = normalize_repository_url(repository_url)
+        metadata = self.inspect(canonical)
+        if not metadata.accessible:
+            return None
+        
+        branch = metadata.default_branch or "main"
+        try:
+            if metadata.platform == "github":
+                api = f"https://raw.githubusercontent.com/{metadata.owner}/{metadata.name}/{branch}/{urllib.parse.quote(path)}"
+                raw = self._response_bytes(api, accept="text/plain")
+                return raw.decode("utf-8", errors="replace")[:self.max_readme_characters]
+            else:
+                project_path = urllib.parse.quote(f"{metadata.owner}/{metadata.name}", safe="")
+                encoded_file = urllib.parse.quote(path, safe="")
+                api = f"https://gitlab.com/api/v4/projects/{project_path}/repository/files/{encoded_file}/raw?ref={urllib.parse.quote(branch)}"
+                raw = self._response_bytes(api, accept="text/plain")
+                return raw.decode("utf-8", errors="replace")[:self.max_readme_characters]
+        except (requests.RequestException, RepositoryAccessError):
+            return None
+

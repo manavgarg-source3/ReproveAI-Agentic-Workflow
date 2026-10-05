@@ -181,3 +181,6 @@ curl -F "file=@/path/to/paper.pdf;type=application/pdf" \
   http://localhost:8000/api/v1/analyze-paper
 ```
 # ReproveAI-Agentic-Workflow
+
+### STEP 4: Environment Reconstruction
+STEP 4 reconstructs a documented/observed environment specification. It does not install, validate, or execute that environment.
