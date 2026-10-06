@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "REPROVE — Structured Research Analysis",
+  title: "REPRO - Structured Research Analysis",
   description: "Extract research papers into a strict, reviewable structure.",
 };
 

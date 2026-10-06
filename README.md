@@ -180,7 +180,20 @@ Example request:
 curl -F "file=@/path/to/paper.pdf;type=application/pdf" \
   http://localhost:8000/api/v1/analyze-paper
 ```
-# ReproveAI-Agentic-Workflow
-
 ### STEP 4: Environment Reconstruction
-STEP 4 reconstructs a documented/observed environment specification. It does not install, validate, or execute that environment.
+STEP 4 reconstructs documented and observed environment specifications as part of
+`POST /api/v1/analyze-paper`. It uses the bounded repository tree and experiment
+mappings from Step 3, then reads a prioritized set of environment manifests through
+the same repository provider. Results retain source paths, evidence, certainty,
+missing information, and unresolved conflicts.
+
+Repository access remains bounded per repository: 200 visible files, directory depth
+2, 1 MB per response, 40,000 retained text characters, 6 metadata requests, and 4
+content requests by default. These limits are configurable with the existing
+`MAX_REPOSITORY_*` environment variables, including
+`MAX_REPOSITORY_CONTENT_REQUESTS`.
+
+The reconstruction path only parses content. It does not clone repositories, install
+dependencies, execute repository code, build containers, or download datasets and
+checkpoints. Environment-variable assignment values are discarded; only names and
+secret classification are returned.

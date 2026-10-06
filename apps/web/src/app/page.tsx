@@ -1,7 +1,22 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useRef, useState, useEffect } from "react";
-import { AnalysisResponse, analyzePaper, analyzeEnvironment, Artifact, ArtifactFile, Claim, ClaimEvidenceAssessment, EvidenceItem, Experiment, ExperimentArtifactMap, Reference, ReferenceValidation, EnvironmentSpecification } from "@/lib/api";
+import {
+  AnalysisResponse,
+  analyzePaper,
+  Artifact,
+  ArtifactFile,
+  Claim,
+  ClaimEvidenceAssessment,
+  EvidenceItem,
+  Experiment,
+  ExperimentArtifactMap,
+  Reference,
+  ReferenceValidation,
+  EnvironmentSpecification,
+  ReproductionPlan,
+  ResearchCase,
+} from "@/lib/api";
 
 function UploadIcon() {
   return <svg aria-hidden="true" viewBox="0 0 24 24" className="h-6 w-6" fill="none"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 15.5v2A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5v-2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>;
@@ -202,7 +217,7 @@ function ArtifactReadinessResults({ experiments, artifacts, files, maps }: { exp
 }
 
 function EnvironmentReconstructionResults({ envs, experiments, artifacts }: { envs: EnvironmentSpecification[]; experiments: Experiment[]; artifacts: Artifact[] }) {
-  if (!envs || !envs.length) return null;
+  if (!envs?.length) return <p className="empty-state mt-6">No reconstructable repository environment was identified.</p>;
   const experimentsById = new Map(experiments.map(e => [e.id, e]));
   const artifactsById = new Map(artifacts.map(a => [a.artifact_id, a]));
   
@@ -221,23 +236,257 @@ function EnvironmentReconstructionResults({ envs, experiments, artifacts }: { en
             <article key={env.environment_id} className="readiness-card">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
-                  <p className="text-xs font-semibold text-slate-500">{env.experiment_id ?? "Global Environment"} A {art?.name ?? "Repository artifact"}</p>
+                  <p className="text-xs font-semibold text-slate-500">{env.experiment_id ?? "Global Environment"} - {art?.name ?? "Repository artifact"}</p>
                   <h4 className="mt-1 text-sm font-semibold text-slate-950">{exp?.objective ?? "Artifact Environment Mapping"}</h4>
                 </div>
                 <span className={`artifact-badge ${env.status === 'RECONSTRUCTED' ? 'artifact-verified' : env.status === 'BLOCKED' || env.status === 'UNKNOWN' ? 'artifact-missing' : 'artifact-review'}`}>{env.status.replaceAll("_", " ")}</span>
               </div>
               <div className="mt-4 grid gap-x-3 gap-y-2 text-xs leading-5 sm:grid-cols-2 text-slate-600">
-                <p><span className="font-semibold text-slate-800">Python:</span> {env.python_constraint ?? "UNKNOWN"}</p>
+                <p><span className="font-semibold text-slate-800">OS:</span> {[env.operating_system, env.operating_system_version].filter(Boolean).join(" ") || "UNKNOWN"}</p>
+                <p><span className="font-semibold text-slate-800">Python version:</span> {env.python_version ?? "UNKNOWN"}</p>
+                <p><span className="font-semibold text-slate-800">Python constraint:</span> {env.python_constraint ?? "UNKNOWN"}</p>
                 <p><span className="font-semibold text-slate-800">Frameworks:</span> {env.frameworks.length ? env.frameworks.join(", ") : "None detected"}</p>
                 <p><span className="font-semibold text-slate-800">GPU:</span> {env.gpu ?? "UNKNOWN"}</p>
+                <p><span className="font-semibold text-slate-800">GPU memory:</span> {env.gpu_memory ?? "UNKNOWN"}</p>
                 <p><span className="font-semibold text-slate-800">CUDA:</span> {env.cuda_version ?? "UNKNOWN"}</p>
-                <p><span className="font-semibold text-slate-800">Dependencies:</span> {env.dependencies.length ? `${env.dependencies.length} packages found` : "None found"}</p>
+                <p><span className="font-semibold text-slate-800">cuDNN:</span> {env.cudnn_version ?? "UNKNOWN"}</p>
+                <p><span className="font-semibold text-slate-800">Hardware:</span> {[env.cpu, env.memory, env.gpu_memory, env.storage].filter(Boolean).join(" / ") || "UNKNOWN"}</p>
+                <p><span className="font-semibold text-slate-800">Container:</span> {env.container ?? "None detected"}</p>
                 <p><span className="font-semibold text-slate-800">Env Vars:</span> {env.environment_variables.length ? `${env.environment_variables.length} (${env.environment_variables.filter(v => v.secret).length} secret)` : "None found"}</p>
+                <p><span className="font-semibold text-slate-800">Confidence:</span> {env.confidence ?? "UNKNOWN"}</p>
+              </div>
+              <div className="mt-4 grid gap-3">
+                <details className="border-t border-slate-200 pt-3">
+                  <summary className="cursor-pointer text-xs font-semibold text-slate-800">Dependencies ({env.dependencies.length})</summary>
+                  {env.dependencies.length ? <ul className="mt-2 space-y-2 text-xs text-slate-600">{env.dependencies.map((dependency, index) => <li key={`${dependency.name}-${dependency.source_path}-${index}`}><span className="font-semibold text-slate-800">{dependency.name}</span>{dependency.version_constraint ? ` ${dependency.version_constraint}` : ""}<br />Source: {dependency.source_path ?? "Unknown source"}<br />Evidence: {dependency.evidence ?? "Not available"}<br />Certainty: {dependency.certainty}</li>)}</ul> : <p className="mt-2 text-xs text-slate-500">No package dependencies recovered.</p>}
+                </details>
+                <details className="border-t border-slate-200 pt-3">
+                  <summary className="cursor-pointer text-xs font-semibold text-slate-800">Variables, configuration, and commands</summary>
+                  <div className="mt-2 space-y-3 text-xs text-slate-600">
+                    <div><p className="font-semibold text-slate-800">Variables</p>{env.environment_variables.length ? <ul className="mt-1 space-y-1">{env.environment_variables.map((variable, index) => <li key={`${variable.name}-${variable.source_path}-${index}`}>{variable.name}{variable.secret ? " (secret)" : ""} - {variable.source_path ?? "Unknown source"}{variable.evidence ? ` - ${variable.evidence}` : ""}</li>)}</ul> : <p>None</p>}</div>
+                    <div><p className="font-semibold text-slate-800">Configuration</p>{env.configuration_files.length ? <ul className="mt-1 space-y-1">{env.configuration_files.map((item, index) => <li key={`${item.path}-${index}`}>{item.path}{item.evidence ? ` - ${item.evidence}` : ""}{item.relevance_status ? ` - ${item.relevance_status}` : ""}</li>)}</ul> : <p>None</p>}</div>
+                    <p><span className="font-semibold text-slate-800">System packages:</span> {env.system_dependencies.length ? env.system_dependencies.join(", ") : "None"}</p>
+                    <p><span className="font-semibold text-slate-800">Commands:</span> {env.documented_commands.length ? env.documented_commands.join("; ") : "None"}</p>
+                  </div>
+                </details>
+                <details className="border-t border-slate-200 pt-3" open={env.conflict_detected}>
+                  <summary className="cursor-pointer text-xs font-semibold text-slate-800">Evidence and uncertainty</summary>
+                  <div className="mt-2 space-y-3 text-xs text-slate-600">
+                    <p><span className="font-semibold text-slate-800">Missing:</span> {env.missing_information.length ? env.missing_information.join(", ") : "None"}</p>
+                    {env.conflicting_evidence.length > 0 && <div><p className="font-semibold text-red-700">Unresolved conflicts</p><ul className="mt-1 space-y-2">{env.conflicting_evidence.map((item, index) => <li key={`${item.category}-${item.source_path}-${index}`}><span className="font-semibold">{item.category}: {item.value}</span><br />Source: {item.source_path}<br />Evidence: {item.evidence}<br />Certainty: {item.certainty}</li>)}</ul></div>}
+                    {env.evidence.length > 0 && <ul className="space-y-2">{env.evidence.map((item, index) => <li key={`${item.category}-${item.source_path}-${index}`}><span className="font-semibold text-slate-800">{item.category}: {item.value}</span><br />Source: {item.source_path}<br />Evidence: {item.evidence}<br />Certainty: {item.certainty}</li>)}</ul>}
+                    {env.notes.length > 0 && <p><span className="font-semibold text-slate-800">Notes:</span> {env.notes.join(" ")}</p>}
+                  </div>
+                </details>
               </div>
             </article>
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function ReproductionPlanResults({ plans, experiments }: { plans: ReproductionPlan[]; experiments: Experiment[] }) {
+  if (!plans.length) return <p className="empty-state mt-5">No experiment evidence was available for reproduction planning.</p>;
+  const experimentsById = new Map(experiments.map(item => [item.id, item]));
+  return <div className="mt-5 grid gap-4">{plans.map(plan => {
+    const experiment = experimentsById.get(plan.experiment_id);
+    const issues = [...plan.readiness.blocking_requirements, ...plan.missing_requirements];
+    return <article key={plan.plan_id} className="readiness-card">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-[0.68rem] font-bold uppercase tracking-[0.14em] text-amber-700">PLANNED — NOT EXECUTED</p>
+          <h4 className="mt-1 text-sm font-semibold text-slate-950">{experiment?.objective ?? plan.experiment_id}</h4>
+          <p className="mt-1 font-mono text-[0.68rem] text-slate-500">{plan.plan_id}</p>
+        </div>
+        <span className={`artifact-badge ${plan.status === "READY_FOR_EXECUTION" ? "artifact-verified" : plan.status === "BLOCKED" || plan.status === "UNKNOWN" ? "artifact-missing" : "artifact-review"}`}>{plan.status.replaceAll("_", " ")}</span>
+      </div>
+      <div className="mt-4 grid gap-2 text-xs leading-5 text-slate-600 sm:grid-cols-2">
+        <p><span className="font-semibold text-slate-800">Experiment:</span> {plan.experiment_id}</p>
+        <p><span className="font-semibold text-slate-800">Artifact:</span> {plan.artifact_id ?? "UNKNOWN"}</p>
+        <p><span className="font-semibold text-slate-800">Environment:</span> {plan.environment_id ?? "UNKNOWN"}</p>
+        <p><span className="font-semibold text-slate-800">Confidence:</span> {plan.confidence}</p>
+      </div>
+      <p className="mt-3 text-xs leading-5 text-slate-600">{plan.readiness.rationale}</p>
+      <div className="mt-4 grid gap-3">
+        <details className="border-t border-slate-200 pt-3" open>
+          <summary className="cursor-pointer text-xs font-semibold text-slate-800">Entrypoints and planned steps ({plan.entrypoints.length})</summary>
+          {plan.entrypoints.length ? <ol className="mt-2 space-y-2 text-xs text-slate-600">{plan.entrypoints.map(step => <li key={step.step_id}><span className="font-semibold text-slate-800">{step.order}. {step.phase.replaceAll("_", " ")}</span> - {step.script_path ?? "No path"}<br />Role: {step.role.replaceAll("_", " ")} - {step.certainty} - {step.confidence}{step.configuration.length ? <><br />Configuration: {step.configuration.join(", ")}</> : null}</li>)}</ol> : <p className="mt-2 text-xs text-slate-500">No mapped execution file was found.</p>}
+        </details>
+        <details className="border-t border-slate-200 pt-3" open={plan.commands.some(command => command.safety !== "SAFE_TO_PLAN")}>
+          <summary className="cursor-pointer text-xs font-semibold text-slate-800">Documented commands ({plan.commands.length})</summary>
+          {plan.commands.length ? <ul className="mt-2 space-y-3 text-xs text-slate-600">{plan.commands.map((command, index) => <li key={`${command.command}-${index}`}><code className="block overflow-x-auto bg-slate-100 p-2 text-[0.7rem] text-slate-800">{command.command}</code><span className={`mt-1 inline-block font-bold ${command.safety === "UNSAFE_TO_EXECUTE" ? "text-red-700" : command.safety === "REQUIRES_REVIEW" ? "text-amber-700" : "text-emerald-700"}`}>{command.safety.replaceAll("_", " ")}</span><br />Source: {command.source_path ?? command.source} - {command.certainty}{command.safety_reasons.length ? <><br />Review reasons: {command.safety_reasons.join(", ")}</> : null}</li>)}</ul> : <p className="mt-2 text-xs text-slate-500">No explicit command was recovered.</p>}
+        </details>
+        <details className="border-t border-slate-200 pt-3">
+          <summary className="cursor-pointer text-xs font-semibold text-slate-800">Data, model, checkpoint, and configuration requirements</summary>
+          <div className="mt-2 space-y-3 text-xs text-slate-600">
+            <p><span className="font-semibold text-slate-800">Datasets:</span> {plan.data_requirements.length ? plan.data_requirements.map(item => `${item.dataset_name}${item.split ? ` (${item.split})` : ""} - ${item.status}`).join(", ") : "None reported"}</p>
+            <p><span className="font-semibold text-slate-800">Models:</span> {plan.model_requirements.length ? plan.model_requirements.map(item => `${item.name} - ${item.availability}`).join(", ") : "None reported"}</p>
+            <p><span className="font-semibold text-slate-800">Checkpoints:</span> {plan.checkpoint_requirements.length ? plan.checkpoint_requirements.map(item => `${item.name} - ${item.availability}`).join(", ") : "None reported"}</p>
+            <p><span className="font-semibold text-slate-800">Configurations:</span> {plan.configuration_requirements.length ? plan.configuration_requirements.map(item => `${item.path} - ${item.status}`).join(", ") : "None mapped"}</p>
+            <p><span className="font-semibold text-slate-800">Dependencies:</span> {plan.dependency_requirements.length ? plan.dependency_requirements.map(item => `${item.name}${item.version_constraint ? ` ${item.version_constraint}` : ""}`).join(", ") : "None reconstructed"}</p>
+            <p><span className="font-semibold text-slate-800">Hardware:</span> {plan.hardware_requirements.length ? plan.hardware_requirements.map(item => `${item.category}: ${item.value}`).join(", ") : "UNKNOWN"}</p>
+          </div>
+        </details>
+        <details className="border-t border-slate-200 pt-3">
+          <summary className="cursor-pointer text-xs font-semibold text-slate-800">Reported parameters and expected results</summary>
+          <div className="mt-2 space-y-3 text-xs text-slate-600">
+            {plan.reported_parameters.length ? <ul className="space-y-2">{plan.reported_parameters.map((item, index) => <li key={`${item.name}-${item.value}-${index}`}><span className="font-semibold text-slate-800">{item.name}: {item.value}{item.unit ? ` ${item.unit}` : ""}</span><br />{item.status} - {item.certainty} - {item.evidence}</li>)}</ul> : <p>No reported parameters were recovered; no defaults were added.</p>}
+            {plan.expected_results.length ? <ul className="space-y-2">{plan.expected_results.map((item, index) => <li key={`${item.metric_name}-${index}`}><span className="font-semibold text-slate-800">{item.metric_name}: {item.expected_value ?? "value not reported"}</span><br />{item.result_kind.replaceAll("_", " ")} - {item.split ?? "split unknown"}<br />Evidence: {item.evidence}</li>)}</ul> : <p>No expected reported result was available.</p>}
+          </div>
+        </details>
+        <details className="border-t border-slate-200 pt-3" open={issues.length > 0 || plan.conflicts.length > 0}>
+          <summary className="cursor-pointer text-xs font-semibold text-slate-800">Blockers, missing requirements, and conflicts</summary>
+          <div className="mt-2 space-y-3 text-xs text-slate-600">
+            {issues.length ? <ul className="space-y-2">{issues.map((item, index) => <li key={`${item.category}-${item.requirement}-${index}`}><span className="font-semibold text-slate-800">{item.status}: {item.requirement}</span><br />{item.detail}{item.source ? <><br />Source: {item.source}</> : null}</li>)}</ul> : <p>No blockers or missing requirements.</p>}
+            {plan.conflicts.length ? <ul className="space-y-2 text-red-700">{plan.conflicts.map((item, index) => <li key={`${item.category}-${item.requirement}-${index}`}><span className="font-semibold">CONFLICTING: {item.requirement}</span><br />{item.detail}<br />Evidence: {item.evidence ?? "Unavailable"} - {item.certainty}</li>)}</ul> : null}
+          </div>
+        </details>
+        <details className="border-t border-slate-200 pt-3">
+          <summary className="cursor-pointer text-xs font-semibold text-slate-800">Plan evidence ({plan.evidence.length})</summary>
+          {plan.evidence.length ? <ul className="mt-2 space-y-2 text-xs text-slate-600">{plan.evidence.map((item, index) => <li key={`${item.source}-${item.source_path}-${index}`}><span className="font-semibold text-slate-800">{item.source}</span> - {item.source_path ?? "No path"}<br />{item.evidence}<br />{item.certainty} - {item.confidence}</li>)}</ul> : <p className="mt-2 text-xs text-slate-500">No additional evidence trace was available.</p>}
+        </details>
+      </div>
+      {plan.notes.length ? <p className="mt-4 text-xs text-slate-500">{plan.notes.join(" ")}</p> : null}
+    </article>;
+  })}</div>;
+}
+
+function verificationStatusTone(status: string) {
+  if (["VERIFIABLE", "COMPUTATIONALLY_REPRODUCIBLE", "DOCUMENTARILY_VERIFIABLE"].includes(status)) return "artifact-verified";
+  if (["PARTIALLY_VERIFIABLE", "REQUIRES_HUMAN_VALIDATION"].includes(status)) return "artifact-review";
+  if (["INACCESSIBLE", "INSUFFICIENT_EVIDENCE"].includes(status)) return "artifact-missing";
+  return "validation-neutral";
+}
+
+function ResearchVerificationStrategyResults({ researchCase }: { researchCase: ResearchCase | null }) {
+  if (!researchCase) return <p className="empty-state mt-5">No domain-agnostic verification case available.</p>;
+
+  return (
+    <div className="mt-5 grid gap-4">
+      <article className="readiness-card">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-[0.68rem] font-bold uppercase tracking-[0.14em] text-indigo-700">Domain-Agnostic Verification Framework</p>
+            <h4 className="mt-1 text-base font-semibold text-slate-950">
+              {researchCase.domain.replaceAll("_", " ")} Research Case
+            </h4>
+            <p className="mt-1 font-mono text-[0.68rem] text-slate-500">{researchCase.case_id}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`artifact-badge ${verificationStatusTone(researchCase.verification_status)}`}>
+              {researchCase.verification_status.replaceAll("_", " ")}
+            </span>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-2 text-xs leading-5 text-slate-600 sm:grid-cols-3">
+          <p><span className="font-semibold text-slate-800">Domain:</span> {researchCase.domain.replaceAll("_", " ")}</p>
+          <p><span className="font-semibold text-slate-800">Domain Confidence:</span> {researchCase.domain_confidence}</p>
+          <p><span className="font-semibold text-slate-800">Status:</span> {researchCase.verification_status.replaceAll("_", " ")}</p>
+        </div>
+
+        <div className="mt-4">
+          <p className="text-xs font-semibold text-slate-800">Verification Strategy & Candidate Methods:</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {researchCase.verification_methods.map((method) => (
+              <span key={method} className="rounded-md border border-indigo-200 bg-indigo-50/80 px-2.5 py-1 text-xs font-medium text-indigo-800">
+                {method.replaceAll("_", " ")}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3">
+          <details className="border-t border-slate-200 pt-3" open>
+            <summary className="cursor-pointer text-xs font-semibold text-slate-800">
+              Verification Boundary Partitioning
+            </summary>
+            <div className="mt-3 grid gap-3 text-xs text-slate-600 sm:grid-cols-2">
+              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3">
+                <p className="font-semibold text-emerald-800">✓ Automatable Planning Scope</p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-slate-700">
+                  {researchCase.verification_boundary.automatable_scope.map((item, idx) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3">
+                <p className="font-semibold text-amber-800">⚠ Requires Restricted Access</p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-slate-700">
+                  {researchCase.verification_boundary.requires_restricted_access.map((item, idx) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3">
+                <p className="font-semibold text-indigo-800">👤 Requires Human Expert Validation</p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-slate-700">
+                  {researchCase.verification_boundary.requires_human_validation.map((item, idx) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-3">
+                <p className="font-semibold text-slate-700">⊘ Non-Executed / Boundary Scope</p>
+                <ul className="mt-2 list-disc space-y-1 pl-4 text-slate-600">
+                  {researchCase.verification_boundary.unverifiable_scope.map((item, idx) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </details>
+
+          <details className="border-t border-slate-200 pt-3">
+            <summary className="cursor-pointer text-xs font-semibold text-slate-800">
+              Evidence Requirements Taxonomy ({researchCase.evidence_requirements.length})
+            </summary>
+            {researchCase.evidence_requirements.length ? (
+              <div className="mt-3 grid gap-2">
+                {researchCase.evidence_requirements.map((req) => (
+                  <div key={req.requirement_id} className="artifact-file-row">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold text-slate-800">{req.description}</p>
+                      <p className="mt-0.5 text-[0.7rem] text-slate-500">
+                        Type: {req.evidence_type.replaceAll("_", " ")} · Certainty: {req.certainty}
+                        {req.source ? ` · Source: ${req.source}` : ""}
+                      </p>
+                    </div>
+                    <span className={`text-[0.65rem] font-bold uppercase tracking-wide ${req.status === "AVAILABLE" ? "text-emerald-700" : "text-amber-700"}`}>
+                      {req.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-2 text-xs text-slate-500">No additional domain evidence requirements specified.</p>
+            )}
+          </details>
+
+          <details className="border-t border-slate-200 pt-3">
+            <summary className="cursor-pointer text-xs font-semibold text-slate-800">
+              Domain Classification Evidence & Trace ({researchCase.domain_evidence.length})
+            </summary>
+            {researchCase.domain_evidence.length ? (
+              <ul className="mt-2 space-y-1 text-xs text-slate-600">
+                {researchCase.domain_evidence.map((item, idx) => (
+                  <li key={idx} className="font-mono text-[0.7rem] text-slate-700">· {item}</li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-2 text-xs text-slate-500">No explicit domain evidence trace recorded.</p>
+            )}
+          </details>
+        </div>
+
+        {researchCase.notes.length > 0 && (
+          <div className="mt-4 border-t border-slate-200 pt-3">
+            <p className="text-[0.7rem] text-slate-500">{researchCase.notes.join(" ")}</p>
+          </div>
+        )}
+      </article>
     </div>
   );
 }
@@ -285,11 +534,25 @@ function Results({ result }: { result: AnalysisResponse }) {
         <article className="result-card lg:col-span-2">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
             <div><p className="section-number">08 / Artifact Discovery</p><h3 className="mt-3 text-lg font-semibold text-slate-950">Public computational artifacts</h3></div>
-            <p className="max-w-md text-xs leading-5 text-slate-500 sm:text-right">Discovery confirms neither reproducibility nor successful execution. REPROVE has not downloaded or run these artifacts.</p>
+            <p className="max-w-md text-xs leading-5 text-slate-500 sm:text-right">Discovery confirms neither reproducibility nor successful execution. REPRO has not downloaded or run these artifacts.</p>
           </div>
           <div className="mt-5"><ArtifactDiscoveryResults items={result.artifacts} /></div>
           <ArtifactReadinessResults experiments={experiments} artifacts={result.artifacts} files={result.artifact_files} maps={result.experiment_artifact_maps} />
           <EnvironmentReconstructionResults envs={result.environment_specifications} experiments={experiments} artifacts={result.artifacts} />
+        </article>
+        <article className="result-card lg:col-span-2">
+          <div><p className="section-number">09 / Reproduction Plans</p><h3 className="mt-3 text-lg font-semibold text-slate-950">Future execution specifications</h3><p className="mt-1 text-xs leading-5 text-slate-500">Evidence-backed planning only. No repository code, command, installation, download, or experiment has been executed.</p></div>
+          <ReproductionPlanResults plans={result.reproduction_plans} experiments={experiments} />
+        </article>
+        <article className="result-card lg:col-span-2">
+          <div>
+            <p className="section-number">10 / Research Verification Strategy</p>
+            <h3 className="mt-3 text-lg font-semibold text-slate-950">Domain-agnostic verification case</h3>
+            <p className="mt-1 text-xs leading-5 text-slate-500">
+              REPRO framework strategy and verification boundaries. Categorizes computational, statistical, documentary, and expert human review requirements.
+            </p>
+          </div>
+          <ResearchVerificationStrategyResults researchCase={result.research_case} />
         </article>
       </div>
     </section>
@@ -312,34 +575,25 @@ export default function Home() {
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [result, setResult] = useState<AnalysisResponse | null>(null);
-    const [isLoadingEnv, setIsLoadingEnv] = useState(false);
     
     const [elapsedSeconds, setElapsedSeconds] = useState(0);
     const [loadingIndex, setLoadingIndex] = useState(0);
     useEffect(() => {
       let interval: ReturnType<typeof setInterval> | undefined;
       if (isLoading) {
+        let seconds = 0;
         interval = setInterval(() => {
-          setElapsedSeconds(prev => prev + 1);
-          setLoadingIndex(prev => {
-            // we don't have elapsedSeconds easily here without adding it to deps which would reset interval
-            return prev; // We'll update it separately below
-          });
+          seconds += 1;
+          setElapsedSeconds(seconds);
+          if (seconds % 15 === 0) {
+            setLoadingIndex(prev => (prev < loadingMessages.length - 1 ? prev + 1 : prev));
+          }
         }, 1000);
       }
       return () => {
         if (interval) clearInterval(interval);
       };
     }, [isLoading]);
-    
-    // Separate effect for message updating based on elapsedSeconds
-    useEffect(() => {
-      if (isLoading && elapsedSeconds > 0 && elapsedSeconds % 15 === 0) {
-        setLoadingIndex(prev => (prev < loadingMessages.length - 1 ? prev + 1 : prev));
-      }
-    }, [elapsedSeconds, isLoading]);
-
-
 
   function selectFile(nextFile: File | undefined) {
     setError(null); setResult(null);
@@ -351,53 +605,32 @@ export default function Home() {
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) { selectFile(event.target.files?.[0]); }
   function handleDrop(event: DragEvent<HTMLDivElement>) { event.preventDefault(); setIsDragging(false); selectFile(event.dataTransfer.files?.[0]); }
 
-  
-    const formatTime = (secs: number) => {
-      if (secs < 60) return `${secs}s`;
-      const m = Math.floor(secs / 60);
-      const s = secs % 60;
-      return `${m}m ${s}s`;
-    };
+  const formatTime = (secs: number) => {
+    if (secs < 60) return `${secs}s`;
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}m ${s}s`;
+  };
 
-    async function handleAnalyze() {
-      if (!file) return;
-      setIsLoading(true); setError(null); setResult(null); setLoadingIndex(0); setElapsedSeconds(0);
-      try {
-        const response = await analyzePaper(file, "citation");
-        setResult(response);
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : "An unknown error occurred.");
-      } finally {
-        setIsLoading(false);
-      }
+  async function handleAnalyze() {
+    if (!file) return;
+    setIsLoading(true); setError(null); setResult(null); setLoadingIndex(0); setElapsedSeconds(0);
+    try {
+      const response = await analyzePaper(file, "all");
+      setResult(response);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "An unknown error occurred.");
+    } finally {
+      setIsLoading(false);
     }
-
-    async function handleContinueAnalysis() {
-      if (!result || !result.paper_text) return;
-      setIsLoadingEnv(true); setError(null);
-      try {
-        const envResponse = await analyzeEnvironment(result.analysis, result.paper_text);
-        setResult({
-          ...result,
-          artifacts: envResponse.artifacts,
-          artifact_files: envResponse.artifact_files,
-          experiment_artifact_maps: envResponse.experiment_artifact_maps,
-          environment_specifications: envResponse.environment_specifications
-        });
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : "An unknown error occurred.");
-      } finally {
-        setIsLoadingEnv(false);
-      }
-    }
-
+  }
 
   return (
     <main className="min-h-screen overflow-hidden">
       <div className="paper-grid" aria-hidden="true" />
       <div className="relative mx-auto w-full max-w-6xl px-5 pb-20 pt-6 sm:px-8 lg:px-10">
         <header className="flex items-center justify-between border-b border-slate-300/70 pb-5">
-          <div className="flex items-center gap-3"><span className="logo-mark">R</span><span className="text-sm font-semibold tracking-[0.22em] text-slate-950">REPROVE</span></div>
+          <div className="flex items-center gap-3"><span className="logo-mark">R</span><span className="text-sm font-semibold tracking-[0.22em] text-slate-950">REPRO</span></div>
           <span className="rounded-full border border-slate-300 bg-white/60 px-3 py-1.5 text-xs font-medium text-slate-600">Research Analyzer</span>
         </header>
         <section className="mx-auto max-w-3xl pb-8 pt-16 text-center sm:pt-24">
@@ -420,23 +653,8 @@ export default function Home() {
           {error && <div role="alert" className="mt-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>}
         </section>
         
-        
         {result && (
-          <>
-            <Results result={result} />
-            {(!result.artifacts || !result.artifacts.length) && !isLoadingEnv && (
-              <div className="mt-8 text-center">
-                <button onClick={handleContinueAnalysis} className="inline-flex items-center gap-2 rounded-md bg-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-indigo-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600">
-                  Continue Analyzing Environments & Artifacts
-                </button>
-              </div>
-            )}
-            {isLoadingEnv && (
-              <div className="mt-8 text-center">
-                <p className="text-sm font-medium text-slate-500">Extracting and reconstructing environments...</p>
-              </div>
-            )}
-          </>
+          <Results result={result} />
         )}
         <footer className="mt-20 border-t border-slate-200 pt-6 text-center text-xs leading-5 text-slate-500">Results are extracted from the paper by the Research Analyzer. Author-reported claims are not independently verified.</footer>
       </div>
