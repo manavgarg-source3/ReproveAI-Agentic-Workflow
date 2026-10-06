@@ -16,6 +16,7 @@ MAX_README_CHARACTERS = 40_000
 MAX_VISIBLE_FILES = 200
 DEFAULT_MAX_DIRECTORY_DEPTH = 2
 DEFAULT_MAX_METADATA_REQUESTS = 6
+DEFAULT_MAX_CONTENT_REQUESTS = 4
 
 
 def _positive_integer(name: str, default: int) -> int:
@@ -78,8 +79,13 @@ class PublicRepositoryMetadataProvider:
         self.max_requests = _positive_integer(
             "MAX_REPOSITORY_METADATA_REQUESTS", DEFAULT_MAX_METADATA_REQUESTS
         )
+        self.max_content_requests = _positive_integer(
+            "MAX_REPOSITORY_CONTENT_REQUESTS", DEFAULT_MAX_CONTENT_REQUESTS
+        )
         self._requests_made = 0
+        self._content_requests_made: dict[str, int] = {}
         self._cache: dict[str, RepositoryMetadata] = {}
+        self._content_cache: dict[tuple[str, str], str | None] = {}
 
     def _response_bytes(self, url: str, *, accept: str = "application/json") -> bytes:
         if self._requests_made >= self.max_requests:
@@ -107,6 +113,30 @@ class PublicRepositoryMetadataProvider:
             return json.loads(self._response_bytes(url))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise RepositoryAccessError("Repository provider returned malformed metadata.") from exc
+
+    def _content_response_bytes(self, canonical: str, url: str) -> bytes:
+        requests_made = self._content_requests_made.get(canonical, 0)
+        if requests_made >= self.max_content_requests:
+            raise RepositoryAccessError("Repository content request limit reached.")
+        self._content_requests_made[canonical] = requests_made + 1
+        response = self.session.get(
+            url,
+            headers={"Accept": "text/plain"},
+            timeout=self.timeout,
+            stream=True,
+        )
+        if response.status_code != 200:
+            raise RepositoryAccessError(
+                f"Public repository provider returned HTTP {response.status_code}."
+            )
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in response.iter_content(chunk_size=65_536):
+            total += len(chunk)
+            if total > MAX_RESPONSE_BYTES:
+                raise RepositoryAccessError("Repository file exceeded the safety limit.")
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     def inspect(self, repository_url: str) -> RepositoryMetadata:
         canonical = normalize_repository_url(repository_url)
@@ -166,11 +196,25 @@ class PublicRepositoryMetadataProvider:
         partial = bool(tree_data.get("truncated")) or eligible_count > self.max_files
 
         readme_excerpt = None
+        readme_path = None
         try:
             readme = self._json(f"{api}/readme")
             if readme.get("encoding") == "base64" and readme.get("content"):
                 decoded = base64.b64decode(readme["content"], validate=False).decode("utf-8", errors="replace")
                 readme_excerpt = decoded[:self.max_readme_characters]
+                reported_path = str(readme.get("path") or "").strip("/")
+                if reported_path:
+                    readme_path = reported_path
+                else:
+                    readme_path = next(
+                        (
+                            item.path for item in bounded_tree
+                            if not item.is_directory
+                            and "/" not in item.path
+                            and item.path.casefold().startswith("readme")
+                        ),
+                        None,
+                    )
         except (requests.RequestException, RepositoryAccessError):
             notes.append("Repository README could not be retrieved.")
 
@@ -193,6 +237,7 @@ class PublicRepositoryMetadataProvider:
             default_branch=branch,
             latest_commit=latest_commit,
             readme_excerpt=readme_excerpt,
+            readme_path=readme_path,
             visible_files=files,
             file_tree=bounded_tree,
             inspection_partial=partial,
@@ -260,6 +305,7 @@ class PublicRepositoryMetadataProvider:
             default_branch=branch,
             latest_commit=(metadata.get("last_activity_at") or None),
             readme_excerpt=readme_excerpt,
+            readme_path=readme_name,
             visible_files=files,
             file_tree=bounded_tree,
             inspection_partial=partial,
@@ -273,22 +319,40 @@ class PublicRepositoryMetadataProvider:
     def get_file_content(self, repository_url: str, path: str) -> str | None:
         """Fetch the bounded content of a specific file."""
         canonical = normalize_repository_url(repository_url)
+        cache_key = (canonical, path.casefold())
+        if cache_key in self._content_cache:
+            return self._content_cache[cache_key]
         metadata = self.inspect(canonical)
         if not metadata.accessible:
             return None
-        
+        visible_paths = {
+            item.path.casefold() for item in metadata.file_tree if not item.is_directory
+        }
+        if visible_paths and path.casefold() not in visible_paths:
+            self._content_cache[cache_key] = None
+            return None
+        if (
+            metadata.readme_path is not None
+            and path.casefold() == metadata.readme_path.casefold()
+            and metadata.readme_excerpt is not None
+        ):
+            self._content_cache[cache_key] = metadata.readme_excerpt
+            return metadata.readme_excerpt
+
         branch = metadata.default_branch or "main"
         try:
             if metadata.platform == "github":
                 api = f"https://raw.githubusercontent.com/{metadata.owner}/{metadata.name}/{branch}/{urllib.parse.quote(path)}"
-                raw = self._response_bytes(api, accept="text/plain")
-                return raw.decode("utf-8", errors="replace")[:self.max_readme_characters]
+                raw = self._content_response_bytes(canonical, api)
             else:
                 project_path = urllib.parse.quote(f"{metadata.owner}/{metadata.name}", safe="")
                 encoded_file = urllib.parse.quote(path, safe="")
                 api = f"https://gitlab.com/api/v4/projects/{project_path}/repository/files/{encoded_file}/raw?ref={urllib.parse.quote(branch)}"
-                raw = self._response_bytes(api, accept="text/plain")
-                return raw.decode("utf-8", errors="replace")[:self.max_readme_characters]
+                raw = self._content_response_bytes(canonical, api)
+            result = raw.decode("utf-8", errors="replace")[:self.max_readme_characters]
+            self._content_cache[cache_key] = result
+            return result
         except (requests.RequestException, RepositoryAccessError):
+            self._content_cache[cache_key] = None
             return None
 
