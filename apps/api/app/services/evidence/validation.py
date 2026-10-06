@@ -105,7 +105,7 @@ def validate_claim_evidence(
             if not claim_associations:
                 return claim.id, claim_evidence_items, _unavailable_assessment(
                     claim.id,
-                    citation_status=CitationStatus.NO_CITATION,
+                    citation_status=CitationStatus.NO_ASSOCIATED_CITATION,
                     reference_ids=[],
                     evidence_ids=[],
                     explanation="No citation markers were found associated with this claim in the text.",
@@ -257,7 +257,7 @@ def validate_claim_evidence(
                         pass
 
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(analysis.claims))) as executor:
             future_to_claim = {executor.submit(_process_claim, claim): claim for claim in analysis.claims}
             for future in concurrent.futures.as_completed(future_to_claim):
                 try:

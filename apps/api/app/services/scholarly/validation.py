@@ -65,10 +65,18 @@ def validate_references(
             for reference in reference_list
         ]
 
-    results: list[ReferenceValidation] = []
-    completed: dict[tuple[object, ...], ReferenceValidation] = {}
-    
+    results_by_fingerprint: dict[tuple[object, ...], ReferenceValidation] = {}
+
     import concurrent.futures
+
+    def _fingerprint(reference: Reference) -> tuple[object, ...]:
+        return (
+            reference.doi,
+            reference.title,
+            tuple(reference.authors),
+            reference.year,
+            reference.citation_text,
+        )
 
     def _process_ref(reference):
         fingerprint = (
@@ -78,9 +86,6 @@ def validate_references(
             reference.year,
             reference.citation_text,
         )
-        if fingerprint in completed:
-            return completed[fingerprint].model_copy(update={"reference_id": reference.id}), fingerprint, True
-
         try:
             validation = active_provider.validate_reference(reference)
         except Exception as exc:
@@ -103,17 +108,37 @@ def validate_references(
                     ReferenceValidationStatus.ERROR,
                     "Bibliographic validation could not be completed for this reference.",
                 )
-        return validation, fingerprint, False
+        return validation, fingerprint
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
-        future_to_ref = {executor.submit(_process_ref, ref): ref for ref in reference_list}
+    unique_references: dict[tuple[object, ...], Reference] = {}
+    for reference in reference_list:
+        unique_references.setdefault(_fingerprint(reference), reference)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(unique_references))) as executor:
+        future_to_ref = {
+            executor.submit(_process_ref, reference): fingerprint
+            for fingerprint, reference in unique_references.items()
+        }
         for future in concurrent.futures.as_completed(future_to_ref):
             try:
-                validation, fingerprint, is_cached = future.result()
-                if not is_cached:
-                    completed[fingerprint] = validation
-                results.append(validation)
+                validation, fingerprint = future.result()
+                results_by_fingerprint[fingerprint] = validation
             except Exception:
                 pass
 
+    results = [
+        results_by_fingerprint[_fingerprint(reference)].model_copy(
+            update={"reference_id": reference.id}
+        )
+        for reference in reference_list
+        if _fingerprint(reference) in results_by_fingerprint
+    ]
+    results.extend(
+        _failure_result(
+            reference,
+            ReferenceValidationStatus.SOURCE_UNAVAILABLE,
+            "Reference validation was skipped because the request safety limit was reached.",
+        )
+        for reference in skipped
+    )
     return results
