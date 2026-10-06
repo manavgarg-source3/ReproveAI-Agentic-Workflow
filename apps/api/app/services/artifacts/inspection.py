@@ -131,9 +131,11 @@ def _readme_path_evidence(readme: str | None, path: str) -> list[str]:
         index = lowered.find(name, start)
         if index < 0:
             break
-        compact = re.sub(
-            r"\s+", " ", readme[max(0, index - 180):index + len(name) + 180]
-        ).strip()
+        line_start = readme.rfind("\n", 0, index) + 1
+        line_end = readme.find("\n", index + len(name))
+        if line_end < 0:
+            line_end = len(readme)
+        compact = re.sub(r"\s+", " ", readme[line_start:line_end]).strip()
         evidence.append(f"README: {compact[:400]}")
         if len(evidence) == 2:
             break
