@@ -297,6 +297,86 @@ def test_github_inspection_bounds_readme_tree_depth_requests_and_reuses_cache(mo
     assert len(session.calls) == 4
 
 
+def test_repository_content_reads_reuse_cache_and_obey_independent_limit(monkeypatch) -> None:
+    monkeypatch.setenv("MAX_REPOSITORY_METADATA_REQUESTS", "4")
+    monkeypatch.setenv("MAX_REPOSITORY_CONTENT_REQUESTS", "1")
+    api = "https://api.github.com/repos/google-research/bert"
+    raw = "https://raw.githubusercontent.com/google-research/bert/master"
+    responses = {
+        api: FakeResponse({"name": "bert", "default_branch": "master"}),
+        f"{api}/git/trees/master?recursive=1": FakeResponse({"tree": [
+            {"path": "README.md", "type": "blob", "size": 100},
+            {"path": "requirements.txt", "type": "blob", "size": 20},
+            {"path": "environment.yml", "type": "blob", "size": 30},
+        ], "truncated": False}),
+        f"{api}/readme": FakeResponse({
+            "encoding": "base64",
+            "content": base64.b64encode(b"README content").decode(),
+        }),
+        f"{api}/commits?per_page=1": FakeResponse([{"sha": "abc123"}]),
+        f"{raw}/requirements.txt": FakeResponse(b"numpy==1.26"),
+        f"{raw}/environment.yml": FakeResponse(b"dependencies:\n  - python=3.11"),
+    }
+    session = FakeSession(responses)
+    provider = PublicRepositoryMetadataProvider(session=session)
+
+    assert provider.get_file_content(BERT_URL, "README.md") == "README content"
+    assert provider.get_file_content(BERT_URL, "requirements.txt") == "numpy==1.26"
+    assert provider.get_file_content(BERT_URL, "requirements.txt") == "numpy==1.26"
+    assert provider.get_file_content(BERT_URL, "environment.yml") is None
+    assert len(session.calls) == 5
+
+
+def test_root_and_nested_readmes_retain_their_own_content(monkeypatch) -> None:
+    monkeypatch.setenv("MAX_REPOSITORY_METADATA_REQUESTS", "4")
+    api = "https://api.github.com/repos/google-research/bert"
+    nested_raw = "https://raw.githubusercontent.com/google-research/bert/master/examples/README.md"
+    responses = {
+        api: FakeResponse({"name": "bert", "default_branch": "master"}),
+        f"{api}/git/trees/master?recursive=1": FakeResponse({"tree": [
+            {"path": "README.md", "type": "blob", "size": 20},
+            {"path": "examples/README.md", "type": "blob", "size": 22},
+        ], "truncated": False}),
+        f"{api}/readme": FakeResponse({
+            "path": "README.md",
+            "encoding": "base64",
+            "content": base64.b64encode(b"ROOT_ONLY_TEXT").decode(),
+        }),
+        f"{api}/commits?per_page=1": FakeResponse([{"sha": "abc123"}]),
+        nested_raw: FakeResponse(b"NESTED_ONLY_TEXT"),
+    }
+    provider = PublicRepositoryMetadataProvider(session=FakeSession(responses))
+
+    root = provider.get_file_content(BERT_URL, "README.md")
+    nested = provider.get_file_content(BERT_URL, "examples/README.md")
+
+    assert root == "ROOT_ONLY_TEXT"
+    assert nested == "NESTED_ONLY_TEXT"
+    assert "NESTED_ONLY_TEXT" not in root
+    assert "ROOT_ONLY_TEXT" not in nested
+
+
+def test_repository_content_rejects_oversized_file_and_caches_failure(monkeypatch) -> None:
+    monkeypatch.setenv("MAX_REPOSITORY_METADATA_REQUESTS", "4")
+    api = "https://api.github.com/repos/google-research/bert"
+    raw = "https://raw.githubusercontent.com/google-research/bert/master/requirements.txt"
+    responses = {
+        api: FakeResponse({"name": "bert", "default_branch": "master"}),
+        f"{api}/git/trees/master?recursive=1": FakeResponse({"tree": [
+            {"path": "requirements.txt", "type": "blob", "size": 1_000_001},
+        ], "truncated": False}),
+        f"{api}/readme": FakeResponse({}, status=404),
+        f"{api}/commits?per_page=1": FakeResponse([]),
+        raw: FakeResponse(b"x" * 1_000_001),
+    }
+    session = FakeSession(responses)
+    provider = PublicRepositoryMetadataProvider(session=session)
+
+    assert provider.get_file_content(BERT_URL, "requirements.txt") is None
+    assert provider.get_file_content(BERT_URL, "requirements.txt") is None
+    assert session.calls.count(raw) == 1
+
+
 def test_tree_failure_preserves_bounded_readme(monkeypatch) -> None:
     monkeypatch.setenv("MAX_REPOSITORY_METADATA_REQUESTS", "4")
     api = "https://api.github.com/repos/google-research/bert"
