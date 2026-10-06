@@ -37,12 +37,17 @@ from app.schemas.research import (
     PlanEvidence,
     PlanIssue,
     PlannedCommand,
+    PublishedResult,
     ReadinessAssessment,
     ReportedParameter,
     ReproductionPlan,
     ReproductionPlanStatus,
+    ReproductionTarget,
+    ReproductionTargetSelection,
     RequirementStatus,
     ResearchAnalysis,
+    TargetScoreDimension,
+    TargetSelectionScore,
 )
 
 
@@ -93,6 +98,7 @@ PARAMETER_PATTERNS = {
     "layers": r"\b(?:number of )?layers?\b\s*(?:of|=|:|was|is)?\s*(\d+)",
     "beam_size": r"\bbeam[ _-]?size\b\s*(?:of|=|:|was|is)?\s*(\d+)",
     "temperature": r"\btemperature\b\s*(?:of|=|:|was|is)?\s*([0-9]+(?:\.[0-9]+)?)",
+    "repeated_runs": r"\b(?:averaged over|repeated for|evaluated over)\s*(\d+)\s+runs?\b",
 }
 
 
@@ -220,10 +226,10 @@ def _select_artifact(
     mapped_ids = {item.artifact_id for item in mappings if item.experiment_id == experiment.id}
     candidates = [
         item for item in artifacts
-        if item.artifact_id in mapped_ids or item.experiment_id == experiment.id
+        if item.type in {ArtifactType.CODE, ArtifactType.EXECUTION_SCRIPT}
+        and (item.artifact_id in mapped_ids or item.experiment_id == experiment.id)
     ]
     candidates.sort(key=lambda item: (
-        item.type != ArtifactType.CODE,
         item.availability_status == ArtifactStatus.INACCESSIBLE,
         item.artifact_id,
     ))
@@ -271,7 +277,10 @@ def _data_requirements(
     if not experiment.dataset:
         return []
     artifact = _related_artifact(artifacts, experiment, ArtifactType.DATASET, experiment.dataset)
-    status = _artifact_status(artifact)
+    status = (
+        _artifact_status(artifact) if artifact is not None
+        else RequirementStatus.IDENTIFIED
+    )
     preprocessing = sorted({
         item.path for item in files if item.role in {
             ArtifactFileRole.DATA_PREPARATION, ArtifactFileRole.PREPROCESSING
@@ -329,7 +338,10 @@ def _model_requirements(
         evidence=evidence,
         certainty=Certainty.EXPLICIT,
         confidence=artifact.confidence if artifact else ArtifactConfidence.MEDIUM,
-        availability=_artifact_status(artifact),
+        availability=(
+            _artifact_status(artifact) if artifact is not None
+            else RequirementStatus.IDENTIFIED
+        ),
         notes=[] if artifact else ["No model artifact was associated with the experiment."],
     )]
 
@@ -858,3 +870,294 @@ def generate_reproduction_plans(
             notes=notes,
         ))
     return plans
+
+
+def _target_issue(
+    requirement: str, detail: str, *, category: str = "target"
+) -> PlanIssue:
+    return _issue(category, requirement, RequirementStatus.UNKNOWN, detail)
+
+
+def _target_score(
+    experiment: Experiment,
+    plan: ReproductionPlan,
+    environment: EnvironmentSpecification | None,
+    code_artifact: Artifact | None,
+) -> TargetSelectionScore:
+    """Score evidence coverage only; this is not a scientific-quality score."""
+
+    dataset = plan.data_requirements[0] if plan.data_requirements else None
+    model = plan.model_requirements[0] if plan.model_requirements else None
+    checks = [
+        ("experiment_clarity", bool(experiment.objective.strip()), "A non-empty experiment objective is present."),
+        ("dataset_identifiability", bool(experiment.dataset), "The experiment names a dataset."),
+        ("dataset_availability", bool(dataset and dataset.status == RequirementStatus.AVAILABLE), "An associated dataset artifact is available."),
+        ("model_identifiability", bool(experiment.model), "The experiment names a model."),
+        ("checkpoint_availability", any(item.availability == RequirementStatus.AVAILABLE for item in plan.checkpoint_requirements), "An associated checkpoint is available."),
+        ("metric_result_clarity", bool(experiment.metric and experiment.reported_result is not None), "Both a metric and published value are present."),
+        ("code_availability", bool(code_artifact and _artifact_status(code_artifact) == RequirementStatus.AVAILABLE), "A mapped code artifact is available."),
+        ("file_mapping_quality", bool(plan.entrypoints), "Step 3B mapped at least one execution-related file."),
+        ("environment_completeness", bool(environment and environment.status == EnvironmentStatus.RECONSTRUCTED), "Step 4 reconstructed the environment without a blocked or unknown status."),
+        ("configuration_completeness", bool(plan.configuration_requirements), "At least one experiment configuration is mapped."),
+        ("execution_command_availability", bool(plan.commands), "At least one bounded documented command is available."),
+    ]
+    dimensions = [
+        TargetScoreDimension(
+            name=name,
+            satisfied=satisfied,
+            points=1 if satisfied else 0,
+            evidence=evidence if satisfied else f"Not satisfied: {evidence}",
+        )
+        for name, satisfied, evidence in checks
+    ]
+    return TargetSelectionScore(
+        total=sum(item.points for item in dimensions),
+        maximum=len(dimensions),
+        dimensions=dimensions,
+    )
+
+
+def _target_readiness(
+    experiment: Experiment,
+    plan: ReproductionPlan,
+    code_artifact: Artifact | None,
+    eligible: bool,
+    missing: list[PlanIssue],
+) -> ReproductionPlanStatus:
+    if not eligible:
+        return ReproductionPlanStatus.UNKNOWN
+    code_state = _artifact_status(code_artifact)
+    critical_unavailable = code_state in {
+        RequirementStatus.MISSING, RequirementStatus.INACCESSIBLE
+    }
+    critical_unavailable = critical_unavailable or any(
+        item.status in {RequirementStatus.MISSING, RequirementStatus.INACCESSIBLE}
+        for item in plan.data_requirements
+    )
+    critical_unavailable = critical_unavailable or any(
+        item.artifact_id is not None
+        and item.availability in {RequirementStatus.MISSING, RequirementStatus.INACCESSIBLE}
+        for item in [*plan.model_requirements, *plan.checkpoint_requirements]
+    )
+    if critical_unavailable:
+        return ReproductionPlanStatus.BLOCKED
+    if missing or plan.conflicts:
+        return ReproductionPlanStatus.PARTIALLY_READY
+    return plan.status
+
+
+def generate_reproduction_targets(
+    analysis: ResearchAnalysis,
+    plans: list[ReproductionPlan],
+    artifacts: list[Artifact],
+    files: list[ArtifactFile],
+    experiment_maps: list[ExperimentArtifactMap],
+    environments: list[EnvironmentSpecification],
+) -> ReproductionTargetSelection:
+    """Rank AI/ML experiment targets deterministically without executing anything."""
+
+    plans_by_experiment = {item.experiment_id: item for item in plans}
+    candidates: list[ReproductionTarget] = []
+    for experiment in sorted(analysis.experiments, key=lambda item: item.id):
+        plan = plans_by_experiment.get(experiment.id)
+        if plan is None:
+            continue
+        code_artifact = next(
+            (
+                item for item in artifacts
+                if item.artifact_id == plan.artifact_id
+                and item.type in {ArtifactType.CODE, ArtifactType.EXECUTION_SCRIPT}
+            ),
+            None,
+        )
+        if code_artifact is None:
+            mapped_artifact_ids = {
+                item.artifact_id for item in experiment_maps
+                if item.experiment_id == experiment.id
+            }
+            code_artifact = next((
+                item for item in sorted(artifacts, key=lambda value: value.artifact_id)
+                if item.type in {ArtifactType.CODE, ArtifactType.EXECUTION_SCRIPT}
+                and (
+                    item.artifact_id in mapped_artifact_ids
+                    or item.experiment_id == experiment.id
+                )
+            ), None)
+        environment = next(
+            (item for item in environments if item.environment_id == plan.environment_id), None
+        )
+        mapped_files = sorted({
+            item.path for item in files
+            if item.experiment_id == experiment.id
+            and item.relevance_status != FileRelevanceStatus.UNRELATED
+            and (code_artifact is None or item.artifact_id == code_artifact.artifact_id)
+        })
+        file_mappings = sorted(
+            (
+                item for item in files
+                if item.path in mapped_files and item.experiment_id == experiment.id
+            ),
+            key=lambda item: (item.path.casefold(), item.role.value),
+        )
+        eligible = bool(
+            experiment.objective.strip()
+            and experiment.dataset
+            and experiment.model
+            and experiment.metric
+            and experiment.reported_result is not None
+        )
+        score = _target_score(experiment, plan, environment, code_artifact)
+        missing = [*plan.missing_requirements]
+        if not experiment.dataset:
+            missing.append(_target_issue("dataset identity", "The experiment does not identify a dataset."))
+        if not experiment.model:
+            missing.append(_target_issue("model identity", "The experiment does not identify a model."))
+        if not experiment.metric:
+            missing.append(_target_issue("metric", "The experiment does not identify a measurable metric."))
+        if experiment.reported_result is None:
+            missing.append(_target_issue("published result", "No published metric value is attached to the experiment."))
+        if experiment.dataset and not plan.data_requirements:
+            missing.append(_target_issue("dataset requirement", "No dataset requirement could be constructed."))
+        if experiment.model and not plan.model_requirements:
+            missing.append(_target_issue("model requirement", "No model requirement could be constructed."))
+        if not plan.checkpoint_requirements:
+            missing.append(_target_issue(
+                "checkpoint identity",
+                "No checkpoint or explicit checkpoint-free initialization procedure was identified.",
+                category="checkpoint",
+            ))
+        if not experiment.split:
+            missing.append(_target_issue("dataset split", "The evaluation dataset split is unknown."))
+        missing = list({
+            (item.category, item.requirement, item.detail): item for item in missing
+        }.values())
+
+        matching_claim = next((
+            claim for claim in analysis.claims
+            if claim.metric and experiment.metric
+            and claim.metric.casefold() == experiment.metric.casefold()
+            and claim.reported_value == experiment.reported_result
+        ), None)
+        source_location = experiment.evidence_locations[0] if experiment.evidence_locations else None
+        published = None
+        if experiment.metric and experiment.reported_result is not None:
+            published = PublishedResult(
+                metric_name=experiment.metric,
+                reported_value=experiment.reported_result,
+                source_location=source_location,
+                source_claim_id=matching_claim.id if matching_claim else None,
+                evidence=(
+                    f"Experiment {experiment.id} reports {experiment.metric} = "
+                    f"{experiment.reported_result}"
+                    + (f" at {source_location}." if source_location else ".")
+                ),
+                certainty=Certainty.EXPLICIT,
+            )
+        seed = next((
+            item.value for item in plan.reported_parameters if item.name == "seed"
+        ), None)
+        repeated_runs = next((
+            item.value for item in plan.reported_parameters if item.name == "repeated_runs"
+        ), None)
+        satisfied = [
+            item.name.replace("_", " ") for item in score.dimensions if item.satisfied
+        ]
+        reason = (
+            "Eligible AI/ML target; deterministic evidence coverage includes "
+            + ", ".join(satisfied)
+            + "."
+            if eligible else
+            "Not eligible for primary selection because dataset, model, metric, and a published value are not all identified."
+        )
+        readiness = _target_readiness(
+            experiment, plan, code_artifact, eligible, missing
+        )
+        documented_command = plan.commands[0] if plan.commands else None
+        command_phase = next((
+            step.phase
+            for step in [
+                *plan.entrypoints,
+                *plan.training_steps,
+                *plan.evaluation_steps,
+                *plan.inference_steps,
+            ]
+            if documented_command is not None and step.command == documented_command
+        ), None)
+        candidates.append(ReproductionTarget(
+            target_id=_stable_id("TARGET", experiment.id, plan.plan_id),
+            plan_id=plan.plan_id,
+            experiment_id=experiment.id,
+            paper_title=analysis.paper.title,
+            objective=experiment.objective,
+            eligible=eligible,
+            selection_score=score,
+            dataset=plan.data_requirements[0] if plan.data_requirements else None,
+            dataset_version=(
+                next((item.version for item in artifacts if plan.data_requirements and item.type == ArtifactType.DATASET and item.name == plan.data_requirements[0].dataset_name), None)
+            ),
+            model=plan.model_requirements[0] if plan.model_requirements else None,
+            model_version=(plan.model_requirements[0].version if plan.model_requirements else None),
+            checkpoint=plan.checkpoint_requirements[0] if plan.checkpoint_requirements else None,
+            metric=experiment.metric,
+            evaluation_protocol=(f"Reported {experiment.split} split" if experiment.split else None),
+            published_result=published,
+            baseline=experiment.baseline,
+            random_seed=seed,
+            repeated_runs=repeated_runs,
+            code_artifact_id=code_artifact.artifact_id if code_artifact else None,
+            relevant_files=mapped_files,
+            file_mappings=file_mappings,
+            configuration_files=[item.path for item in plan.configuration_requirements],
+            environment_id=plan.environment_id,
+            environment_status=environment.status if environment else None,
+            environment_specification=environment,
+            dependency_requirements=plan.dependency_requirements,
+            hardware_requirements=plan.hardware_requirements,
+            documented_command=documented_command,
+            documented_command_phase=command_phase,
+            required_inputs=[item.name for item in plan.input_requirements if item.required],
+            missing_requirements=missing,
+            evidence=plan.evidence,
+            certainty=Certainty.EXPLICIT if experiment.evidence_locations else Certainty.INFERRED,
+            readiness_status=readiness,
+            selection_reason=reason,
+            notes=[
+                "AI/ML planning only; the target has not been executed.",
+                "Selection score measures evidence coverage, not scientific importance or quality.",
+            ],
+        ))
+
+    status_priority = {
+        ReproductionPlanStatus.READY_FOR_EXECUTION: 0,
+        ReproductionPlanStatus.PARTIALLY_READY: 1,
+        ReproductionPlanStatus.BLOCKED: 2,
+        ReproductionPlanStatus.UNKNOWN: 3,
+    }
+    eligible_targets = sorted(
+        (item for item in candidates if item.eligible),
+        key=lambda item: (
+            -item.selection_score.total,
+            status_priority[item.readiness_status],
+            item.target_id,
+        ),
+    )
+    ranks = {item.target_id: rank for rank, item in enumerate(eligible_targets, 1)}
+    selected_id = eligible_targets[0].target_id if eligible_targets else None
+    ranked_candidates = [
+        item.model_copy(update={
+            "selected": item.target_id == selected_id,
+            "selection_rank": ranks.get(item.target_id),
+        })
+        for item in candidates
+    ]
+    selected = next(
+        (item for item in ranked_candidates if item.target_id == selected_id), None
+    )
+    return ReproductionTargetSelection(
+        candidate_targets=ranked_candidates,
+        selected_target_id=selected_id,
+        selected_target=selected,
+        notes=([] if selected else [
+            "No experiment met the minimum AI/ML target definition: dataset, model, metric, and published value."
+        ]),
+    )

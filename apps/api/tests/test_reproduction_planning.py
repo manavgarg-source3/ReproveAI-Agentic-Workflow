@@ -28,6 +28,7 @@ from app.schemas.research import (
 from app.services.reproduction.planning import (
     classify_command_safety,
     generate_reproduction_plans,
+    generate_reproduction_targets,
 )
 
 
@@ -138,7 +139,9 @@ def environment(
             evidence="Observed repository configuration",
             relevance_status="RELEVANT",
         )],
-        documented_commands=commands or ["python train.py --config configs/train.yaml"],
+        documented_commands=(
+            ["python train.py --config configs/train.yaml"] if commands is None else commands
+        ),
         gpu="NVIDIA V100",
         evidence=[
             EnvironmentEvidence(
@@ -186,6 +189,24 @@ def generate(
         maps if maps is not None else [mapping(item.id) for item in experiments],
         environments,
         paper_text,
+    )
+
+
+def select(
+    experiments: list[Experiment],
+    artifacts: list[Artifact],
+    files: list[ArtifactFile],
+    environments: list[EnvironmentSpecification],
+    paper_text: str = "",
+    maps: list[ExperimentArtifactMap] | None = None,
+):
+    actual_maps = maps if maps is not None else [mapping(item.id) for item in experiments]
+    analysis = ResearchAnalysis(paper=PaperMetadata(title="Test"), experiments=experiments)
+    plans = generate_reproduction_plans(
+        analysis, [], [], artifacts, files, actual_maps, environments, paper_text
+    )
+    return generate_reproduction_targets(
+        analysis, plans, artifacts, files, actual_maps, environments
     )
 
 
@@ -347,3 +368,147 @@ def test_docker_command_keeps_dockerfile_source_and_plan_ids_are_deterministic()
     assert first.commands[0].source_path == "Dockerfile"
     assert first.plan_id == second.plan_id
     assert first.model_dump(mode="json") == second.model_dump(mode="json")
+
+
+def test_bert_candidates_rank_one_primary_glue_target_without_execution() -> None:
+    experiments = [
+        experiment("EXP-GLUE", dataset="GLUE", model="BERT-Large", metric="accuracy", result=0.914),
+        experiment("EXP-SQUAD", dataset="SQuAD", model="BERT-Large", metric="F1", result=90.9),
+    ]
+    code = artifact("ART-CODE", ArtifactType.CODE, name="google-research/bert", experiment_id=None)
+    artifacts = [
+        code,
+        artifact("ART-GLUE", ArtifactType.DATASET, name="GLUE", experiment_id="EXP-GLUE"),
+        artifact("ART-SQUAD", ArtifactType.DATASET, name="SQuAD", experiment_id="EXP-SQUAD"),
+        artifact("ART-BERT", ArtifactType.MODEL, name="BERT-Large", experiment_id=None),
+    ]
+    files = [
+        repository_file("run_classifier.py", ArtifactFileRole.EVALUATION, experiment_id="EXP-GLUE"),
+        repository_file("configs/glue.json", ArtifactFileRole.CONFIGURATION, experiment_id="EXP-GLUE"),
+        repository_file("bert_large.ckpt", ArtifactFileRole.CHECKPOINT, experiment_id="EXP-GLUE"),
+        repository_file("run_squad.py", ArtifactFileRole.EVALUATION, experiment_id="EXP-SQUAD"),
+    ]
+    env = environment(commands=["python run_classifier.py --task_name=MRPC"])
+
+    selection = select(experiments, artifacts, files, [env])
+
+    assert len(selection.candidate_targets) == 2
+    assert selection.selected_target is not None
+    assert selection.selected_target.experiment_id == "EXP-GLUE"
+    assert selection.selected_target.published_result.reported_value == 0.914
+    assert selection.selected_target.observed_result.status.value == "NOT_AVAILABLE"
+    assert selection.selected_target.documented_command.command.startswith("python run_classifier.py")
+
+
+def test_resnet_repository_backed_case_selects_image_net_target() -> None:
+    exp = experiment("EXP-RESNET", dataset="ImageNet", model="ResNet-152", metric="Top-5 error", result=3.57)
+    artifacts = [
+        artifact("ART-CODE", ArtifactType.CODE, name="facebook/fb.resnet.torch", experiment_id="EXP-RESNET"),
+        artifact("ART-DATA", ArtifactType.DATASET, name="ImageNet", experiment_id="EXP-RESNET"),
+        artifact("ART-MODEL", ArtifactType.MODEL, name="ResNet-152", experiment_id="EXP-RESNET"),
+    ]
+    files = [repository_file("train.lua", ArtifactFileRole.TRAINING, experiment_id="EXP-RESNET")]
+    env = environment(experiment_id="EXP-RESNET", commands=["th train.lua -dataset imagenet"])
+
+    selection = select([exp], artifacts, files, [env], maps=[mapping("EXP-RESNET")])
+
+    assert selection.selected_target.experiment_id == "EXP-RESNET"
+    assert selection.selected_target.metric == "Top-5 error"
+    assert selection.selected_target.published_result.result_kind == "PUBLISHED_RESULT"
+
+
+def complete_target_inputs():
+    complete = experiment(dataset="Dataset-X", model="Model-X", metric="accuracy", result=0.91)
+    data = artifact("ART-DATA", ArtifactType.DATASET, name="Dataset-X")
+    model = artifact("ART-MODEL", ArtifactType.MODEL, name="Model-X")
+    code = artifact("ART-CODE", ArtifactType.CODE, name="code")
+    entrypoint = repository_file("train.py", ArtifactFileRole.TRAINING)
+    return complete, data, model, code, entrypoint
+
+
+def test_paper_with_experiment_but_no_code_is_blocked() -> None:
+    complete, data, model, _, _ = complete_target_inputs()
+    no_code = select([complete], [data, model], [], [])
+    assert no_code.selected_target.readiness_status == ReproductionPlanStatus.BLOCKED
+
+
+def test_code_without_measurable_result_is_not_eligible() -> None:
+    _, data, model, code, entrypoint = complete_target_inputs()
+    no_result = select(
+        [experiment(dataset="Dataset-X", model="Model-X", metric="accuracy")],
+        [code, data, model], [entrypoint], [environment()],
+    )
+    assert no_result.selected_target is None
+    assert no_result.candidate_targets[0].eligible is False
+
+
+def test_identified_but_unavailable_dataset_blocks_target() -> None:
+    complete, _, model, code, entrypoint = complete_target_inputs()
+    missing_data = artifact(
+        "ART-DATA", ArtifactType.DATASET, name="Dataset-X", availability=ArtifactStatus.MISSING
+    )
+    unavailable_dataset = select(
+        [complete], [code, missing_data, model], [entrypoint], [environment()]
+    )
+    assert unavailable_dataset.selected_target.readiness_status == ReproductionPlanStatus.BLOCKED
+
+
+def test_model_with_missing_checkpoint_exposes_requirement() -> None:
+    complete, data, model, code, entrypoint = complete_target_inputs()
+    missing_checkpoint = select(
+        [complete], [code, data, model], [entrypoint], [environment()]
+    )
+    assert any(
+        item.requirement == "checkpoint identity"
+        for item in missing_checkpoint.selected_target.missing_requirements
+    )
+
+
+def test_missing_metric_is_not_eligible() -> None:
+    _, data, model, code, entrypoint = complete_target_inputs()
+    no_metric = select(
+        [experiment(dataset="Dataset-X", model="Model-X", result=0.91)],
+        [code, data, model], [entrypoint], [environment()],
+    )
+    assert no_metric.selected_target is None
+
+
+def test_conflicting_experiment_information_lowers_readiness() -> None:
+    complete, data, model, code, entrypoint = complete_target_inputs()
+    conflicting = select(
+        [complete], [code, data, model], [entrypoint], [environment()],
+        "Dataset-X learning rate was 1e-3.\nDataset-X learning rate was 2e-3.",
+    )
+    assert conflicting.selected_target.readiness_status == ReproductionPlanStatus.PARTIALLY_READY
+
+
+def test_missing_environment_remains_explicit() -> None:
+    complete, data, model, code, entrypoint = complete_target_inputs()
+    missing_environment = select([complete], [code, data, model], [entrypoint], [])
+    assert missing_environment.selected_target.environment_id is None
+    assert missing_environment.selected_target.readiness_status == ReproductionPlanStatus.PARTIALLY_READY
+
+
+def test_missing_documented_command_remains_explicit() -> None:
+    complete, data, model, code, entrypoint = complete_target_inputs()
+    missing_command = select(
+        [complete], [code, data, model], [entrypoint], [environment(commands=[])]
+    )
+    assert missing_command.selected_target.documented_command is None
+
+
+def test_incomplete_step3b_mapping_remains_explicit() -> None:
+    complete, data, model, code, _ = complete_target_inputs()
+    incomplete_mapping = select([complete], [code, data, model], [], [environment()])
+    assert not incomplete_mapping.selected_target.relevant_files
+    assert any(
+        item.requirement == "execution entrypoint"
+        for item in incomplete_mapping.selected_target.missing_requirements
+    )
+
+
+def test_no_eligible_reproduction_target_returns_empty_selection() -> None:
+    _, _, _, code, _ = complete_target_inputs()
+    no_eligible = select([experiment()], [code], [], [])
+    assert no_eligible.selected_target_id is None
+    assert no_eligible.notes
