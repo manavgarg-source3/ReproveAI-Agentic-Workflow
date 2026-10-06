@@ -22,6 +22,7 @@ class RepositoryMetadata:
     default_branch: str | None = None
     latest_commit: str | None = None
     readme_excerpt: str | None = None
+    readme_path: str | None = None
     visible_files: list[str] = field(default_factory=list)
     file_tree: list[RepositoryFileMetadata] = field(default_factory=list)
     inspection_partial: bool = False
