@@ -418,7 +418,9 @@ class ReproductionPlanStatus(str, Enum):
 
 
 class RequirementStatus(str, Enum):
+    IDENTIFIED = "IDENTIFIED"
     AVAILABLE = "AVAILABLE"
+    PARTIALLY_AVAILABLE = "PARTIALLY_AVAILABLE"
     MISSING = "MISSING"
     INACCESSIBLE = "INACCESSIBLE"
     CONFLICTING = "CONFLICTING"
@@ -451,6 +453,17 @@ class ParameterStatus(str, Enum):
 
 class ResultKind(str, Enum):
     EXPECTED_REPORTED_RESULT = "EXPECTED_REPORTED_RESULT"
+    PUBLISHED_RESULT = "PUBLISHED_RESULT"
+
+
+class ObservedResultStatus(str, Enum):
+    EXTRACTED = "EXTRACTED"
+    PARTIALLY_EXTRACTED = "PARTIALLY_EXTRACTED"
+    AMBIGUOUS = "AMBIGUOUS"
+    NOT_FOUND = "NOT_FOUND"
+    UNAVAILABLE = "UNAVAILABLE"
+    INVALID = "INVALID"
+    NOT_AVAILABLE = "NOT_AVAILABLE"
 
 
 class PlanEvidence(StrictModel):
@@ -656,6 +669,112 @@ class ReproductionPlan(StrictModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class TargetScoreDimension(StrictModel):
+    name: str
+    satisfied: bool
+    points: int = Field(ge=0, le=1)
+    evidence: str
+
+
+class TargetSelectionScore(StrictModel):
+    total: int = Field(ge=0)
+    maximum: int = Field(ge=1)
+    dimensions: list[TargetScoreDimension]
+
+
+class PublishedResult(StrictModel):
+    metric_name: str
+    reported_value: float
+    unit: str | None = None
+    source_location: str | None = None
+    source_claim_id: str | None = None
+    evidence: str
+    certainty: Certainty
+    result_kind: ResultKind = ResultKind.PUBLISHED_RESULT
+
+
+class ObservedResult(StrictModel):
+    status: ObservedResultStatus = ObservedResultStatus.NOT_AVAILABLE
+    observed_result_id: str | None = None
+    run_id: str | None = None
+    target_id: str | None = None
+    experiment_id: str | None = None
+    metric_name: str | None = None
+    value: float | None = None
+    unit: str | None = None
+    dataset: str | None = None
+    dataset_version: str | None = None
+    dataset_split: str | None = None
+    model: str | None = None
+    model_version: str | None = None
+    checkpoint: str | None = None
+    evaluation_protocol: str | None = None
+    execution_type: str | None = None
+    source_type: str | None = None
+    source_location: str | None = None
+    source_output_id: str | None = None
+    raw_value: str | None = None
+    certainty: Certainty = Certainty.UNKNOWN
+    confidence: ArtifactConfidence = ArtifactConfidence.LOW
+    extraction_method: str | None = None
+    evidence: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class ReproductionTarget(StrictModel):
+    target_id: str
+    plan_id: str
+    experiment_id: str
+    paper_title: str | None = None
+    objective: str
+    eligible: bool
+    selected: bool = False
+    selection_rank: int | None = Field(default=None, ge=1)
+    selection_score: TargetSelectionScore
+    dataset: DataRequirement | None = None
+    dataset_version: str | None = None
+    model: ModelRequirement | None = None
+    model_version: str | None = None
+    checkpoint: ModelRequirement | None = None
+    metric: str | None = None
+    evaluation_protocol: str | None = None
+    published_result: PublishedResult | None = None
+    observed_result: ObservedResult = Field(default_factory=ObservedResult)
+    baseline: str | None = None
+    random_seed: str | None = None
+    repeated_runs: str | None = None
+    code_artifact_id: str | None = None
+    relevant_files: list[str] = Field(default_factory=list)
+    file_mappings: list[ArtifactFile] = Field(default_factory=list)
+    configuration_files: list[str] = Field(default_factory=list)
+    environment_id: str | None = None
+    environment_status: EnvironmentStatus | None = None
+    environment_specification: EnvironmentSpecification | None = None
+    dependency_requirements: list[DependencyRequirement] = Field(default_factory=list)
+    hardware_requirements: list[HardwareRequirement] = Field(default_factory=list)
+    documented_command: PlannedCommand | None = None
+    documented_command_phase: ExecutionPhase | None = None
+    required_inputs: list[str] = Field(default_factory=list)
+    missing_requirements: list[PlanIssue] = Field(default_factory=list)
+    evidence: list[PlanEvidence] = Field(default_factory=list)
+    certainty: Certainty
+    readiness_status: ReproductionPlanStatus
+    selection_reason: str
+    notes: list[str] = Field(default_factory=list)
+
+
+class ReproductionTargetSelection(StrictModel):
+    candidate_targets: list[ReproductionTarget] = Field(default_factory=list)
+    selected_target_id: str | None = None
+    selected_target: ReproductionTarget | None = None
+    selection_method: str = (
+        "Eligible candidates are ranked by deterministic evidence coverage score, "
+        "then readiness status, then stable target ID."
+    )
+    notes: list[str] = Field(default_factory=list)
+
+
 class ResearchDomain(str, Enum):
     AI_ML = "AI_ML"
     SOCIAL_SCIENCE = "SOCIAL_SCIENCE"
@@ -759,6 +878,9 @@ class AnalyzePaperResponse(StrictModel):
     experiment_artifact_maps: list[ExperimentArtifactMap] = Field(default_factory=list)
     environment_specifications: list[EnvironmentSpecification] = Field(default_factory=list)
     reproduction_plans: list[ReproductionPlan] = Field(default_factory=list)
+    reproduction_targets: ReproductionTargetSelection = Field(
+        default_factory=ReproductionTargetSelection
+    )
     research_case: ResearchCase | None = None
     analysis_context: AnalysisContextDiagnostics | None = None
     extraction: ExtractionDiagnostics
