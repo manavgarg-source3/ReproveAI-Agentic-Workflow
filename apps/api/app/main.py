@@ -10,6 +10,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routes.analysis import router as analysis_router
+from app.routes.execution import router as execution_router
+from app.routes.diagnostic import router as diagnostic_router
+from app.routes.graph import router as graph_router
+from app.routes.reports import router as reports_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,3 +67,7 @@ def health() -> dict[str, str]:
 
 
 app.include_router(analysis_router)
+app.include_router(execution_router)
+app.include_router(diagnostic_router)
+app.include_router(graph_router)
+app.include_router(reports_router)

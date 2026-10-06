@@ -26,6 +26,7 @@ from app.services.environment.reconstruction import reconstruct_environments
 from app.services.reproduction.planning import generate_reproduction_plans
 from app.services.scholarly.validation import validate_references
 from app.services.verification.case import build_research_case
+from app.services.execution.sandbox import execution_service
 
 router = APIRouter(prefix="/api/v1", tags=["analysis"])
 logger = logging.getLogger(__name__)
@@ -228,7 +229,7 @@ async def analyze_paper(file: UploadFile = File(...), stage: str = Query("all"))
         research_case.domain.value,
     )
     logger.info("Paper analysis completed in %.2fs (stage=all)", perf_counter() - request_started)
-    return AnalyzePaperResponse(
+    response = AnalyzePaperResponse(
         paper_text=extracted.text,
         analysis=analysis,
         reference_validation=reference_validation,
@@ -254,6 +255,13 @@ async def analyze_paper(file: UploadFile = File(...), stage: str = Query("all"))
             character_count=extracted.character_count,
         ),
     )
+    from datetime import datetime, timezone
+    execution_service.repository.put_research_case(
+        research_case.case_id,
+        response.model_dump(mode="json"),
+        datetime.now(timezone.utc).isoformat()
+    )
+    return response
 
 class AnalyzeEnvironmentRequest(BaseModel):
     analysis: dict
@@ -320,3 +328,4 @@ async def analyze_environment(request: AnalyzeEnvironmentRequest):
         "reproduction_plans": [p.model_dump() for p in reproduction_plans],
         "research_case": research_case.model_dump(),
     }
+
