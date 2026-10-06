@@ -1,6 +1,27 @@
 # REPROVE
 
-REPROVE currently provides one traceable vertical slice: upload a PDF, extract its text, analyze it with Google Gemini, validate a strict research-analysis schema, validate its references with the existing scientometric engine, compare citation-backed claims with bounded source evidence, and render the result. There is no agent framework, application database, queue, or container runtime yet; the reused engine retains its own local provider cache.
+REPROVE provides a traceable vertical slice from PDF ingestion through evidence-grounded AI/ML target planning and an explicitly approved, development-grade Docker execution boundary. The execution service fails closed when Docker or staged inputs are unavailable. There is no agent framework, application database, distributed queue, or production multi-tenant runtime; the reused scientometric engine retains its own local provider cache.
+
+Step 7 adds deterministic observed-result extraction from terminal Step 6 evidence.
+It parses bounded JSON, CSV, and explicitly target-matched stdout patterns, verifies
+persisted output hashes, preserves ambiguity, and links each observation to its run,
+target, output, hash, and source location. It never copies published values, executes
+output content, or performs published-versus-observed comparison; comparison and
+reproduction verdicts remain future Step 8 behavior.
+
+Step 8 adds deterministic published-versus-observed comparison. It evaluates
+metric and context compatibility, performs only explicit unit conversions,
+calculates absolute and relative differences, and applies tolerance only when a
+caller supplies a justified basis. Missing or blocked evidence remains
+INCONCLUSIVE/BLOCKED; no discrepancy causes or Step 9 hypotheses are generated.
+
+Step 9 adds evidence-bound discrepancy investigation planning. `NOT_REPRODUCED`
+comparisons can create a detected discrepancy with proposed dataset,
+preprocessing, and configuration hypotheses plus structured diagnostic plans.
+`VERIFIED`, `INCONCLUSIVE`, and `BLOCKED` comparisons remain respectively
+no-discrepancy, inconclusive, and blocked. Plans are never executed in Step 9,
+hypotheses are never presented as causes, and human review is required for
+discrepancy investigations.
 
 For a file-by-file explanation, function responsibilities, architectural decisions, and dated change history, see [`IMPLEMENTATION_LOG.md`](./IMPLEMENTATION_LOG.md). This living document is updated with every implementation change.
 
@@ -197,3 +218,114 @@ The reconstruction path only parses content. It does not clone repositories, ins
 dependencies, execute repository code, build containers, or download datasets and
 checkpoints. Environment-variable assignment values are discarded; only names and
 secret classification are returned.
+
+## STEP 5: AI/ML Reproduction Target Selection and Planning
+
+Step 5 consumes the existing experiment, claim evidence, artifact mapping, and
+environment outputs. It does not rediscover or mutate them. The pipeline is:
+
+```text
+Experiments -> Candidate Targets -> Eligibility Assessment -> Selected Target -> Reproduction Plan
+```
+
+`POST /api/v1/analyze-paper` retains the backward-compatible `reproduction_plans`
+array and adds `reproduction_targets`, containing all candidates, one selected target
+when eligible, the stable selected-target ID, and the deterministic selection method.
+An eligible AI/ML target must identify an objective, dataset, model, metric, and
+published value. Ineligible experiments remain visible as candidates but cannot be
+selected.
+
+Eligible candidates receive one point for each evidence-coverage dimension:
+experiment clarity, dataset identity, dataset availability, model identity,
+checkpoint availability, metric/result clarity, code availability, Step 3B file
+mapping, complete Step 4 environment, configuration availability, and documented
+command availability. Candidates are ordered by descending score, then readiness
+(`READY_FOR_EXECUTION`, `PARTIALLY_READY`, `BLOCKED`, `UNKNOWN`), then stable target
+ID. This score measures suitability as a first computational target; it is not a
+scientific quality or importance score.
+
+The selected target links to its plan and exposes dataset/split, model/checkpoint,
+metric, published result and source, code/configuration files, environment,
+dependencies through the linked plan, documented command, required inputs, missing
+requirements, evidence, and readiness. `published_result` is author-reported;
+`observed_result` is explicitly `NOT_AVAILABLE` because Step 5 performs no execution.
+
+Readiness meanings:
+
+- `READY_FOR_EXECUTION`: all deterministically required planning evidence is present;
+- `PARTIALLY_READY`: the target is defined but non-trivial prerequisites remain;
+- `BLOCKED`: a critical code, dataset, model, checkpoint, or environment resource is unavailable;
+- `UNKNOWN`: the minimum measurable AI/ML target cannot be established.
+
+Step 5 is AI/ML-only and read/parse/map/rank/plan/report-only. It never executes a
+documented command, repository file, container, or model; installs no dependency;
+and downloads no dataset or checkpoint. Commands remain untrusted text. Current
+limitations include dependence on Step 1B's structured experiment fields, bounded
+Step 3B mappings, and explicit Step 4 evidence. Dataset/model versions, checkpoints,
+seeds, repeated runs, and evaluation details remain unknown unless upstream evidence
+actually reports them.
+
+## STEP 6: Secure AI/ML Reproduction Execution
+
+Step 6 adds a development-grade, Docker-only execution boundary for one explicitly
+approved `READY_FOR_EXECUTION` AI/ML target:
+
+```text
+Target -> Approval -> Validation -> Artifact Hash -> Docker Sandbox
+       -> Resource/Network Policy -> Execution -> Logs -> Immutable Run Record
+```
+
+There is deliberately no host-Python fallback. If Docker, the allowlisted local image,
+the immutable code snapshot, or staged inputs are unavailable, execution returns a
+blocked record or approval fails. REPROVE never pulls an image, repository, dataset,
+checkpoint, or dependency during execution.
+
+### Threat model and sandbox boundary
+
+Research repositories and their commands are untrusted. The executor accepts only a
+structured `python <mapped-relative-script.py> ...` command. Shell composition,
+absolute/parent entrypoints, unlisted scripts, alternate interpreters, and non-
+allowlisted images are rejected. The trusted Docker control process uses argument
+arrays with `shell=False`; research code runs only inside the container.
+
+The container uses a read-only root filesystem and non-root numeric user, drops all
+Linux capabilities, enables `no-new-privileges`, disables networking and GPU exposure,
+uses a private IPC namespace, and receives only read-only snapshot/input mounts.
+Writable `/tmp` and `/outputs` are size-limited tmpfs mounts. No application `.env`,
+home directory, SSH/cloud credentials, Docker socket, application source, host PID/IPC
+namespace, privileged mode, or host network is exposed. Output files leave tmpfs
+through a bounded trusted archive stream, are safely extracted into a fresh controlled
+directory, hashed, and recorded.
+
+Default policy: 1 CPU, 512 MB RAM with swap disabled, 120 seconds, 32 processes,
+128 MB combined tmp/output storage, 64 MB outputs, 256 KB per stdout/stderr stream,
+network disabled, and GPU disabled. Policy bounds and the image allowlist are enforced
+server-side.
+
+### Approval and integrity
+
+Approval is explicit and binds the human approver, immutable target hash, policy hash,
+and artifact SHA-256. Immediately before execution the service rehashes the source,
+copies it to a temporary snapshot, and verifies the snapshot again. Inputs are also
+hashed. Original artifacts are mounted read-only and are never modified. Every attempt
+creates a new frozen run record; historical records are never overwritten.
+
+Execution endpoints:
+
+```text
+POST /api/v1/reproduction/{target_id}/approve
+POST /api/v1/reproduction/{target_id}/execute
+GET  /api/v1/reproduction/{target_id}/runs
+GET  /api/v1/reproduction/{target_id}/runs/{run_id}
+```
+
+The frontend presents readiness, approval identity, the fixed execution policy, an
+explicit untrusted-code warning, execution controls, and bounded run details. A
+`COMPLETED` run means only that the sandboxed process exited successfully. Step 6 does
+not compare observed output with the published result.
+
+Current limitations: approvals and run history are in-memory and intended for a
+single development process; trusted artifact/input staging is an internal server
+operation; only Python and the preapproved `python:3.12-slim` image are supported; GPU
+and network access are unavailable; Docker availability and daemon hardening remain
+operator responsibilities. This is not a production-grade multi-tenant sandbox.

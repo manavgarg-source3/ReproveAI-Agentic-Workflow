@@ -847,3 +847,245 @@ Ran `npm run build` completely outside the sandbox. The exact same `TurbopackInt
 - Distinguishes explicitly stated requirements from inferred ones.
 - Safely extracts environment variables (hiding secrets).
 - Enforces no execution and no installation boundaries.
+
+### 2026-10-06 — Step 5 AI/ML Reproduction Target Selection
+
+Goal:
+Add a deterministic target-selection layer above the existing per-experiment
+reproduction plans, selecting one measurable AI/ML experiment without executing
+research artifacts.
+
+Architecture:
+`Experiments -> Candidate Targets -> Eligibility Assessment -> Selected Target ->
+Reproduction Plan`. Existing Step 1-4 records are referenced and left unchanged.
+
+Files changed:
+- `apps/api/app/schemas/research.py`: added published/observed result separation,
+  target score dimensions, `ReproductionTarget`, and `ReproductionTargetSelection`.
+- `apps/api/app/services/reproduction/planning.py`: added deterministic 11-dimension
+  evidence-coverage scoring, minimum AI/ML eligibility, stable ranking, readiness
+  derivation, selection reasons, and explicit missing requirements.
+- `apps/api/app/routes/analysis.py`: added `reproduction_targets` to both analysis
+  flows while preserving `reproduction_plans`.
+- `apps/api/tests/test_reproduction_planning.py`: added BERT and ResNet target cases
+  plus the ten requested negative conditions.
+- `apps/api/tests/test_analysis_endpoint.py`: updated response-contract assertions.
+- `apps/web/src/lib/api.ts` and `apps/web/src/app/page.tsx`: added target types and a
+  selected-target panel after artifacts/environment, with clearly separated
+  published and unavailable observed results.
+- `README.md`: documented architecture, score, readiness, boundary, and limitations.
+
+Behavior:
+- Candidates require an experiment objective, dataset, model, metric, and published
+  value to be eligible for primary selection.
+- Eligible candidates rank by evidence coverage, readiness, and stable target ID.
+- Non-selected and ineligible candidates remain available for future planning.
+- No eligible candidate yields an explicit empty selection rather than a fabricated
+  target.
+- Published values retain their upstream numeric value and paper location; observed
+  results are always `NOT_AVAILABLE` in Step 5.
+- Commands are extracted as text only and keep safety annotations.
+
+No-execution boundary:
+No research code or documented command was run. No dataset, checkpoint, model, or
+repository was downloaded. No dependency was installed and no container was built
+or run. The scientometric engine was not modified.
+
+Known limitations:
+Target selection can only preserve information represented by the existing Step 1B
+schema and Step 2-4 evidence. Versions, checkpoints, random seeds, repeated-run
+statistics, and protocols remain explicit unknowns when upstream evidence omits them.
+
+Verification performed:
+- Step 5 focused suite: 20 passed, including ten separately named negative tests.
+- API endpoint integration suite: 8 passed.
+- Complete backend regression suite: 160 passed with one pre-existing Starlette
+  test-client deprecation warning.
+- BERT fixture: selected `EXP-GLUE`, `READY_FOR_EXECUTION`, evidence score 11/11,
+  published accuracy 0.914, no missing requirements.
+- ResNet fixture: selected `EXP-RESNET`, `PARTIALLY_READY`, evidence score 10/11,
+  published Top-5 error 3.57, checkpoint identity unresolved.
+- Frontend ESLint, standalone TypeScript checking, and Next.js production build passed.
+- Python compilation and diff whitespace checks passed.
+- The execution-primitive source scan found no subprocess import/call, `os.system`,
+  `os.popen`, `shell=True`, `exec`, or `eval` in the Step 5 runtime path. Text-only
+  safety tests and documentation intentionally mention prohibited command examples.
+- `git diff --name-only -- Scientometric-Audit-Studio-main` returned no changes.
+
+### 2026-10-06 — Step 6 Secure AI/ML Reproduction Execution
+
+Goal:
+Introduce the smallest fail-closed execution vertical slice for one explicitly
+approved AI/ML target while treating research artifacts as untrusted software.
+
+Architecture:
+`Target -> Approval -> Validation -> Artifact Hash -> Docker Sandbox -> Resource
+Policy -> Network Policy -> Execution -> Bounded Logs -> Immutable Run Record`.
+
+Files added/changed:
+- `apps/api/app/schemas/execution.py`: immutable approval, policy, sandbox, input,
+  output, failure, status, and execution-record contracts.
+- `apps/api/app/services/execution/sandbox.py`: target validation, command parsing,
+  SHA-256 verification, immutable staging, Docker orchestration, resource controls,
+  bounded/redacted output capture, cleanup, output hashing, and append-only records.
+- `apps/api/app/routes/execution.py`: minimum approval, execute, history, and run-detail
+  API.
+- `apps/api/app/main.py` and `apps/api/app/routes/analysis.py`: route registration and
+  in-memory target registration after Step 5.
+- `apps/api/tests/fixtures/execution/`: deterministic accuracy fixture labeled
+  `EXECUTION_INFRASTRUCTURE_FIXTURE`.
+- `apps/api/tests/test_secure_execution.py`: policy, approval, integrity, command,
+  resource, audit-record, API, and Docker integration coverage.
+- `apps/web/src/lib/api.ts` and `apps/web/src/app/page.tsx`: execution contracts,
+  approval/execution calls, explicit warning, fixed policy display, and run details.
+- `README.md`: threat model, sandbox boundary, approval flow, API, policies, and limits.
+
+Security controls:
+- Docker only; host fallback is forbidden.
+- `--network none`, read-only root, non-root user, all capabilities dropped,
+  `no-new-privileges`, private IPC, no GPU request, no privileged/host namespaces.
+- CPU, memory and swap, PID, runtime, tmpfs storage, output, and log limits.
+- Only read-only controlled workspace/input mounts; output leaves tmpfs only through
+  a bounded trusted archive stream into a fresh temporary directory.
+- Explicit safe environment allowlist; application environment and secrets are not
+  forwarded. Sensitive staged paths are rejected and secret-like log values redacted.
+- Only mapped relative Python scripts are allowed; shell syntax and interpreter
+  chaining are rejected. Docker control uses `shell=False`.
+- Approval binds target, policy, artifact identity, and approver. Artifact and input
+  hashes are checked again immediately before execution.
+
+Execution result in this environment:
+Docker Desktop 4.94.0 is installed and the Linux engine reports 29.8.2. The
+allowlisted `python:3.12-slim` image was already local with identity
+`sha256:ddb0207ae1f0356c2b724d740769b0c5f5f51cc54a0525178f721825f78fe74c`;
+the service did not pull it. The deterministic fixture completed in the real
+Docker sandbox with the expected `{"metric":"accuracy","value":0.75}` output.
+Dynamic probes also verified filesystem/secret/network isolation and timeout,
+memory, PID, CPU, storage, and output controls. The BERT-style target remains
+blocked because no code snapshot, dataset, checkpoint, or configuration was
+staged, and nothing was downloaded.
+
+Development limitations:
+Approvals, staged-source registrations, and records are in-memory; the service is not
+multi-process durable. Artifact staging is intentionally an internal trusted-server
+operation. Only Python CPU execution is supported. Docker daemon isolation and host
+configuration are outside this development slice, so this must not be represented as
+production-grade multi-tenant isolation.
+
+Verification performed:
+- Step 6 security/API/fixture suite: 34 passed, 0 skipped against the real Docker
+  engine.
+- Complete backend suite: 194 passed, 1 skipped, with one pre-existing Starlette
+  test-client deprecation warning.
+- Frontend ESLint, standalone TypeScript checking, and Next.js production build passed.
+- Python bytecode compilation and `git diff --check` passed.
+- The repository-wide source audit found runtime process creation only in
+  `services/execution/sandbox.py`; both calls invoke the trusted Docker CLI using
+  argument arrays and `shell=False`. No `os.system`, `os.popen`, Python `exec`/`eval`,
+  host research-code execution, privileged container, host network/PID/IPC namespace,
+  or unrestricted mount exists in the execution path.
+- Scientometric engine diff: empty.
+
+### 2026-10-06 — Step 6B hardening
+
+Added a SQLite-backed single-node persistence boundary at
+`apps/api/app/services/execution/persistence.py`. Approval records, immutable
+artifact snapshots, run records, output copies, and redacted operational events
+now survive process restart. Approval records bind target, artifact, environment,
+and policy hashes and support expiry/revocation. GPU policy now distinguishes
+disabled/requested/allowed; any non-disabled request is blocked because no
+validated GPU capability exists. API approval uses server-derived principal
+headers (with a local-development principal for the unauthenticated development
+surface) and role checks.
+
+Step 6B remains partial: the current public execute endpoint retains its
+synchronous compatibility contract, and the repository has no existing
+authenticated identity provider. A durable background queue/worker and real
+authentication middleware remain production-hardening work; the local principal
+must not be treated as production authentication. No Step 7 scientific result
+comparison or extraction was added.
+
+Post-hardening verification: complete backend suite 194 passed / 1 skipped;
+Step 6 real-Docker suite 34 passed / 0 skipped; frontend lint, TypeScript,
+production build, Python compilation, and diff checks passed.
+
+### 2026-10-06 — Step 6C async execution completion
+
+Added a durable SQLite job queue with a single worker, transactional job
+claiming/lease metadata, queued execution responses for the real Docker runner,
+explicit cancellation, active-container kill requests, and startup marking of
+stale claimed jobs as `INTERRUPTED` with `WORKER_INTERRUPTED`. The worker uses
+one process-local thread and SQLite WAL/short transactions; this is deliberately
+single-node and not distributed-worker safe. The compatibility fake-runner API
+path remains synchronous for the existing test harness, while the production
+Docker runner defaults to queued execution.
+
+The development principal/header mechanism is still not a production IAM
+provider. A real external authentication provider is not present in this
+repository, so Step 6C is not represented as fully production-authenticated.
+No Step 7 functionality was added and the Scientometric engine remains unchanged.
+
+### 2026-10-06 — Step 7 Observed Result Extraction
+
+Added deterministic observed-result extraction in
+`apps/api/app/services/execution/extraction.py` and expanded the typed
+`ObservedResult` contract. Extraction consumes only terminal Step 6 evidence:
+bounded structured JSON, CSV rows with explicit metric/value columns, and
+target-matched `metric=value` stdout lines. Output hashes are rechecked before
+parsing; malformed, changed, missing, failed, blocked, timed-out, and ambiguous
+evidence produce explicit statuses rather than fabricated values. No scripts,
+serialized code, shell fragments, or arbitrary numeric logs are executed or
+interpreted.
+
+Run detail/history responses now include `observed_result`; the frontend keeps
+Published Result and Observed Result separate and displays extraction evidence.
+The real Docker fixture produced observed `accuracy = 0.75` from its persisted
+`result.json` output and hash. No Step 8 comparison, tolerance, verdict,
+discrepancy, or hypothesis logic was added.
+
+### 2026-10-06 — Step 6D freeze work
+
+Added explicit authenticated-mode approval verification using a signed
+HMAC-backed bearer token (`AUTH_MODE=authenticated`, `REPROVE_AUTH_SECRET`),
+while retaining the clearly development-only principal only when
+`AUTH_MODE=development` is explicitly selected. The request body and arbitrary
+identity headers are not used in authenticated mode. Added the complete legal
+state vocabulary and centralized transition table, durable async polling and
+cancellation controls in the frontend, and exact-run container cancellation
+handles.
+
+The production Docker runner queues asynchronously; the fake runner retains its
+legacy synchronous compatibility behavior for existing tests. This remains a
+single-node MVP: no external IAM provider, distributed worker, or automatic
+execution recovery is claimed. Step 7 remains untouched.
+
+### 2026-10-06 — Step 8 Published vs Observed Comparison
+
+Added typed comparison contracts and deterministic comparison logic. Comparisons
+consume immutable Step 5 publication evidence and Step 7 observed evidence;
+they do not re-extract output data. Metric, unit, dataset, split, model,
+checkpoint, and evaluation context are assessed explicitly. Absolute and
+relative differences are calculated without mutating source records. Tolerance
+is never invented and is applied only when explicitly supplied with a basis and
+source. Comparison assessments are returned with run details and persisted in
+SQLite. Exact fixture agreement is `COMPARABLE` + `VERIFIED`; the explicit
+0.01 fixture tolerance with observed 0.70 is `COMPARABLE` + `NOT_REPRODUCED`.
+No root-cause analysis, hypotheses, diagnostics, or other Step 9 behavior was
+added. The Scientometric engine remains unchanged.
+
+### 2026-10-06 — Step 9 Discrepancy Investigation Planning
+
+Added typed discrepancy, hypothesis, evidence-link, diagnostic-plan, and
+investigation models. Step 8 remains authoritative: verified comparisons create
+no discrepancy, blocked comparisons remain blocked, inconclusive comparisons
+remain inconclusive, and only `NOT_REPRODUCED` creates a detected discrepancy.
+Generated hypotheses are explicitly labelled proposals with FACT/OBSERVATION/
+INFERENCE/HYPOTHESIS/UNKNOWN evidence links. Diagnostic plans include controls,
+variables, expected and alternative observations, decision rules, cost, and
+future Step 6 execution type, but are never executed by Step 9.
+
+Investigation records are durably persisted in SQLite and exposed through the
+reproduction investigation API. The frontend displays comparison context and
+evidence-bound investigation messaging without root-cause attribution. Full
+backend regression: 231 passed; Step 9 investigation tests: 10 passed. No
+Scientometric engine or Step 10 functionality was added.
