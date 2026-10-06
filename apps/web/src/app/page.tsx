@@ -15,6 +15,14 @@ import {
   ReferenceValidation,
   EnvironmentSpecification,
   ReproductionPlan,
+  ReproductionTargetSelection,
+  ExecutionApproval,
+  ExecutionRecord,
+  DEFAULT_EXECUTION_POLICY,
+  approveReproduction,
+  executeReproduction,
+  getReproductionRun,
+  cancelReproductionRun,
   ResearchCase,
 } from "@/lib/api";
 
@@ -287,6 +295,118 @@ function EnvironmentReconstructionResults({ envs, experiments, artifacts }: { en
   );
 }
 
+const terminalExecutionStatuses: string[] = ["COMPLETED", "FAILED", "BLOCKED", "CANCELLED", "TIMED_OUT", "INTERRUPTED"];
+
+function ReproductionTargetResults({ selection }: { selection: ReproductionTargetSelection }) {
+  const target = selection.selected_target;
+  const [approver, setApprover] = useState("");
+  const [approval, setApproval] = useState<ExecutionApproval | null>(null);
+  const [run, setRun] = useState<ExecutionRecord | null>(null);
+  const [executionError, setExecutionError] = useState<string | null>(null);
+  const [executionBusy, setExecutionBusy] = useState(false);
+  const [cancellationBusy, setCancellationBusy] = useState(false);
+  useEffect(() => {
+    if (!target || !run || terminalExecutionStatuses.includes(run.status)) return;
+    const timer = window.setInterval(async () => {
+      try { setRun(await getReproductionRun(target.target_id, run.run_id)); } catch { /* preserve last durable state */ }
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [run, target]);
+  if (!target) return <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-5 text-amber-900">
+    <p className="font-semibold">No eligible primary AI/ML target</p>
+    <p>{selection.notes.join(" ") || "Candidate evidence was insufficient for deterministic selection."}</p>
+    <p className="mt-1">Candidates preserved: {selection.candidate_targets.length}</p>
+  </div>;
+  const missing = target.missing_requirements;
+  return <article className="readiness-card mt-5 border-indigo-200 bg-indigo-50/30">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div>
+        <p className="text-[0.68rem] font-bold uppercase tracking-[0.14em] text-indigo-700">Selected AI/ML reproduction target</p>
+        <h4 className="mt-1 text-base font-semibold text-slate-950">{target.objective}</h4>
+        <p className="mt-1 font-mono text-[0.68rem] text-slate-500">{target.target_id}</p>
+      </div>
+      <span className={`artifact-badge ${target.readiness_status === "READY_FOR_EXECUTION" ? "artifact-verified" : target.readiness_status === "BLOCKED" || target.readiness_status === "UNKNOWN" ? "artifact-missing" : "artifact-review"}`}>{target.readiness_status.replaceAll("_", " ")}</span>
+    </div>
+    <p className="mt-3 text-xs leading-5 text-slate-600">{target.selection_reason}</p>
+    <p className="mt-1 text-xs text-slate-500">Evidence coverage: {target.selection_score.total}/{target.selection_score.maximum} · Rank {target.selection_rank ?? "N/A"} of {selection.candidate_targets.filter(item => item.eligible).length} eligible candidates</p>
+    <div className="mt-4 grid gap-2 text-xs leading-5 text-slate-600 sm:grid-cols-2">
+      <p><span className="font-semibold text-slate-800">Experiment:</span> {target.experiment_id}</p>
+      <p><span className="font-semibold text-slate-800">Dataset:</span> {target.dataset?.dataset_name ?? "UNKNOWN"}{target.dataset?.split ? ` · ${target.dataset.split}` : " · split unknown"}{target.dataset_version ? ` · v${target.dataset_version}` : ""}</p>
+      <p><span className="font-semibold text-slate-800">Model:</span> {target.model?.name ?? "UNKNOWN"}{target.model_version ? ` · v${target.model_version}` : ""}</p>
+      <p><span className="font-semibold text-slate-800">Checkpoint:</span> {target.checkpoint?.name ?? "UNKNOWN / NOT IDENTIFIED"}</p>
+      <p><span className="font-semibold text-slate-800">Metric:</span> {target.metric ?? "UNKNOWN"}</p>
+      <p><span className="font-semibold text-slate-800">Evaluation protocol:</span> {target.evaluation_protocol ?? "UNKNOWN"}</p>
+      <p><span className="font-semibold text-slate-800">Environment:</span> {target.environment_id ?? "UNKNOWN"} · {target.environment_status ?? "UNKNOWN"}</p>
+      <p><span className="font-semibold text-slate-800">Code artifact:</span> {target.code_artifact_id ?? "MISSING"}</p>
+    </div>
+    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+      <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-950">
+        <p className="font-semibold">Published Result</p>
+        <p className="mt-1 text-base font-semibold">{target.published_result ? `${target.published_result.metric_name}: ${target.published_result.reported_value}${target.published_result.unit ? ` ${target.published_result.unit}` : ""}` : "NOT AVAILABLE"}</p>
+        <p className="mt-1">{target.published_result?.source_location ?? "Source location unknown"} · author-reported evidence</p>
+      </div>
+      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+        <p className="font-semibold">Observed Result</p>
+        <p className="mt-1 text-base font-semibold">NOT AVAILABLE</p>
+        <p className="mt-1">No research code has been executed in Step 5.</p>
+      </div>
+    </div>
+    <div className="mt-4 space-y-3 text-xs leading-5 text-slate-600">
+      <p><span className="font-semibold text-slate-800">Relevant files:</span> {target.file_mappings.length ? target.file_mappings.map(item => `${item.path} (${item.role.replaceAll("_", " ")})`).join(", ") : "None mapped"}</p>
+      <p><span className="font-semibold text-slate-800">Configuration:</span> {target.configuration_files.length ? target.configuration_files.join(", ") : "None mapped"}</p>
+      <p><span className="font-semibold text-slate-800">Dependencies:</span> {target.dependency_requirements.length ? target.dependency_requirements.map(item => `${item.name}${item.version_constraint ? ` ${item.version_constraint}` : ""}`).join(", ") : "None reconstructed"}</p>
+      <p><span className="font-semibold text-slate-800">Hardware:</span> {target.hardware_requirements.length ? target.hardware_requirements.map(item => `${item.category}: ${item.value}`).join(", ") : "UNKNOWN"}</p>
+      <p><span className="font-semibold text-slate-800">Documented command:</span> {target.documented_command ? <><code className="rounded bg-slate-100 px-1 py-0.5">{target.documented_command.command}</code>{target.documented_command_phase ? ` · ${target.documented_command_phase.replaceAll("_", " ")}` : ""}</> : "None identified"}</p>
+      <p><span className="font-semibold text-slate-800">Required inputs:</span> {target.required_inputs.length ? target.required_inputs.join(", ") : "None identified"}</p>
+      <div><p className="font-semibold text-slate-800">Missing requirements ({missing.length})</p>{missing.length ? <ul className="mt-1 list-disc pl-5">{missing.map((item, index) => <li key={`${item.category}-${item.requirement}-${index}`}>{item.requirement}: {item.detail}</li>)}</ul> : <p>None identified.</p>}</div>
+    </div>
+    <div className="mt-5 rounded-xl border-2 border-red-200 bg-red-50 p-4 text-xs leading-5 text-red-950">
+      <p className="font-bold uppercase tracking-wide">Warning: untrusted research code</p>
+      <p className="mt-1">Approval authorizes one original execution attempt inside the Docker sandbox. Completion means only that the process finished; it does not establish scientific reproduction.</p>
+      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+        <p><span className="font-semibold">CPU:</span> {DEFAULT_EXECUTION_POLICY.cpu_limit}</p>
+        <p><span className="font-semibold">Memory:</span> {DEFAULT_EXECUTION_POLICY.memory_limit_mb} MB</p>
+        <p><span className="font-semibold">Runtime:</span> {DEFAULT_EXECUTION_POLICY.runtime_limit_seconds}s</p>
+        <p><span className="font-semibold">Processes:</span> {DEFAULT_EXECUTION_POLICY.process_limit}</p>
+        <p><span className="font-semibold">Output:</span> {DEFAULT_EXECUTION_POLICY.output_limit_mb} MB</p>
+        <p><span className="font-semibold">Network:</span> disabled</p>
+        <p><span className="font-semibold">GPU:</span> disabled</p>
+        <p><span className="font-semibold">Root filesystem:</span> read-only</p>
+        <p><span className="font-semibold">Image:</span> {DEFAULT_EXECUTION_POLICY.container_image}</p>
+      </div>
+      <div className="mt-4 flex flex-col gap-2 sm:flex-row">
+        <input className="min-w-0 flex-1 rounded-lg border border-red-200 bg-white px-3 py-2" value={approver} onChange={event => setApprover(event.target.value)} placeholder="Human approver identity" aria-label="Human approver identity" />
+        <button className="rounded-lg bg-amber-700 px-4 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={executionBusy || !approver.trim() || target.readiness_status !== "READY_FOR_EXECUTION"} onClick={async () => {
+          setExecutionBusy(true); setExecutionError(null);
+          try { setApproval(await approveReproduction(target.target_id, approver.trim())); }
+          catch (error) { setExecutionError(error instanceof Error ? error.message : "Approval failed."); }
+          finally { setExecutionBusy(false); }
+        }}>{approval ? "Approved" : "Approve execution"}</button>
+        <button className="rounded-lg bg-red-800 px-4 py-2 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" disabled={executionBusy || !approval} onClick={async () => {
+          if (!approval) return;
+          setExecutionBusy(true); setExecutionError(null);
+          try { setRun(await executeReproduction(target.target_id, approval.approval_id)); }
+          catch (error) { setExecutionError(error instanceof Error ? error.message : "Execution failed."); }
+          finally { setExecutionBusy(false); }
+        }}>Execute reproduction</button>
+      </div>
+      {executionError && <p className="mt-3 font-semibold text-red-800">{executionError}</p>}
+      {approval && <p className="mt-3">Approval: <span className="font-mono">{approval.approval_id}</span> · {approval.approver} · artifact {approval.artifact_hash.slice(0, 12)}…</p>}
+      {run && <div className="mt-4 rounded-lg border border-slate-300 bg-white p-3 text-slate-700">
+        <p className="font-semibold">Run status: {run.status}</p>
+        <p>Run: <span className="font-mono">{run.run_id}</span> · Exit: {run.exit_code ?? "N/A"} · {run.runtime_seconds.toFixed(3)}s</p>
+        {run.failure_reason && <p className="text-red-700">{run.failure_code}: {run.failure_reason}</p>}
+        <p>Artifact hash: {run.artifact_hash ?? "Unavailable"} · Outputs: {run.outputs.length}</p>
+        {run.observed_result && <div className="mt-3 rounded border border-indigo-200 bg-indigo-50 p-2 text-xs"><p className="font-semibold">Observed result (execution evidence only)</p><p>Status: {run.observed_result.status}</p><p>{run.observed_result.metric_name ?? "Metric unavailable"}: {run.observed_result.value ?? "Unavailable"}</p><p>Source: {run.observed_result.source_location ?? "None"} · {run.observed_result.extraction_method ?? "No extraction"}</p></div>}
+        {run.comparison && <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-2 text-xs"><p className="font-semibold">Comparison assessment</p><p>{run.comparison.comparison_status} · {run.comparison.reproduction_status}</p><p>Difference: {run.comparison.absolute_difference ?? "Unavailable"} · Tolerance: {run.comparison.tolerance ?? "Not established"}</p><p className="mt-1">Investigation hypotheses are evidence-bound and require separate human-reviewed diagnostic planning.</p></div>}
+        {!terminalExecutionStatuses.includes(run.status) && <button className="mt-2 rounded bg-slate-800 px-3 py-1 text-xs font-semibold text-white disabled:opacity-50" disabled={cancellationBusy} onClick={async () => { setCancellationBusy(true); setExecutionError(null); try { setRun(await cancelReproductionRun(target.target_id, run.run_id)); } catch (error) { setExecutionError(error instanceof Error ? error.message : "Cancellation failed."); } finally { setCancellationBusy(false); } }}>{cancellationBusy ? "Cancelling..." : "Cancel run"}</button>}
+        {run.status === "INTERRUPTED" && <p className="mt-2 font-semibold text-amber-800">Execution was interrupted and was not automatically re-executed.</p>}
+        <details className="mt-2"><summary className="cursor-pointer font-semibold">Bounded execution details</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-slate-100 p-2">{run.stdout || "No stdout"}{run.stderr ? `\nSTDERR:\n${run.stderr}` : ""}</pre></details>
+      </div>}
+    </div>
+  </article>;
+}
+
 function ReproductionPlanResults({ plans, experiments }: { plans: ReproductionPlan[]; experiments: Experiment[] }) {
   if (!plans.length) return <p className="empty-state mt-5">No experiment evidence was available for reproduction planning.</p>;
   const experimentsById = new Map(experiments.map(item => [item.id, item]));
@@ -542,7 +662,11 @@ function Results({ result }: { result: AnalysisResponse }) {
         </article>
         <article className="result-card lg:col-span-2">
           <div><p className="section-number">09 / Reproduction Plans</p><h3 className="mt-3 text-lg font-semibold text-slate-950">Future execution specifications</h3><p className="mt-1 text-xs leading-5 text-slate-500">Evidence-backed planning only. No repository code, command, installation, download, or experiment has been executed.</p></div>
-          <ReproductionPlanResults plans={result.reproduction_plans} experiments={experiments} />
+          <ReproductionTargetResults key={result.reproduction_targets.selected_target_id ?? "no-target"} selection={result.reproduction_targets} />
+          <details className="mt-5 border-t border-slate-200 pt-4">
+            <summary className="cursor-pointer text-xs font-semibold text-slate-800">All candidate reproduction plans ({result.reproduction_plans.length})</summary>
+            <ReproductionPlanResults plans={result.reproduction_plans} experiments={experiments} />
+          </details>
         </article>
         <article className="result-card lg:col-span-2">
           <div>
