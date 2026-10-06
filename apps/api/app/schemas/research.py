@@ -347,6 +347,14 @@ class Certainty(str, Enum):
     INFERRED = "INFERRED"
     UNKNOWN = "UNKNOWN"
 
+
+class EnvironmentEvidence(StrictModel):
+    category: str
+    value: str
+    source_path: str
+    evidence: str
+    certainty: Certainty
+
 class EnvironmentDependency(StrictModel):
     name: str
     version_constraint: str | None = None
@@ -394,11 +402,350 @@ class EnvironmentSpecification(StrictModel):
     container: str | None = None
     documented_commands: list[str] = Field(default_factory=list)
     system_dependencies: list[str] = Field(default_factory=list)
-    evidence: list[str] = Field(default_factory=list)
+    evidence: list[EnvironmentEvidence] = Field(default_factory=list)
     confidence: str | None = None
     notes: list[str] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
     conflict_detected: bool = False
-    conflicting_evidence: list[str] = Field(default_factory=list)
+    conflicting_evidence: list[EnvironmentEvidence] = Field(default_factory=list)
+
+
+class ReproductionPlanStatus(str, Enum):
+    READY_FOR_EXECUTION = "READY_FOR_EXECUTION"
+    PARTIALLY_READY = "PARTIALLY_READY"
+    BLOCKED = "BLOCKED"
+    UNKNOWN = "UNKNOWN"
+
+
+class RequirementStatus(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    MISSING = "MISSING"
+    INACCESSIBLE = "INACCESSIBLE"
+    CONFLICTING = "CONFLICTING"
+    UNKNOWN = "UNKNOWN"
+    UNSUPPORTED = "UNSUPPORTED"
+
+
+class ExecutionPhase(str, Enum):
+    PREPARATION = "PREPARATION"
+    DATA_PREPARATION = "DATA_PREPARATION"
+    TRAINING = "TRAINING"
+    CHECKPOINTING = "CHECKPOINTING"
+    INFERENCE = "INFERENCE"
+    EVALUATION = "EVALUATION"
+    POSTPROCESSING = "POSTPROCESSING"
+
+
+class CommandSafety(str, Enum):
+    SAFE_TO_PLAN = "SAFE_TO_PLAN"
+    REQUIRES_REVIEW = "REQUIRES_REVIEW"
+    UNSAFE_TO_EXECUTE = "UNSAFE_TO_EXECUTE"
+    UNKNOWN = "UNKNOWN"
+
+
+class ParameterStatus(str, Enum):
+    REPORTED = "REPORTED"
+    INFERRED = "INFERRED"
+    UNKNOWN = "UNKNOWN"
+
+
+class ResultKind(str, Enum):
+    EXPECTED_REPORTED_RESULT = "EXPECTED_REPORTED_RESULT"
+
+
+class PlanEvidence(StrictModel):
+    source: str
+    source_path: str | None = None
+    evidence: str
+    certainty: Certainty
+    confidence: ArtifactConfidence
+
+
+class PlanIssue(StrictModel):
+    category: str
+    requirement: str
+    status: RequirementStatus
+    detail: str
+    source: str | None = None
+    evidence: str | None = None
+    certainty: Certainty = Certainty.UNKNOWN
+
+
+class PlannedCommand(StrictModel):
+    command: str
+    source: str
+    source_path: str | None = None
+    evidence: str
+    certainty: Certainty
+    safety: CommandSafety
+    safety_reasons: list[str] = Field(default_factory=list)
+
+
+class ExecutionInput(StrictModel):
+    name: str
+    type: str
+    source: str | None = None
+    path: str | None = None
+    required: bool = True
+    evidence: str | None = None
+    certainty: Certainty
+    status: RequirementStatus
+
+
+class ExecutionOutput(StrictModel):
+    name: str
+    type: str
+    path_pattern: str | None = None
+    expected_content: str | None = None
+    evidence: str | None = None
+    certainty: Certainty
+    status: RequirementStatus
+
+
+class ExecutionStep(StrictModel):
+    step_id: str
+    experiment_id: str
+    order: int = Field(ge=1)
+    phase: ExecutionPhase
+    role: ArtifactFileRole
+    entrypoint: bool = False
+    script_path: str | None = None
+    command: PlannedCommand | None = None
+    arguments: list[str] = Field(default_factory=list)
+    working_directory: str | None = None
+    inputs: list[ExecutionInput] = Field(default_factory=list)
+    outputs: list[ExecutionOutput] = Field(default_factory=list)
+    environment_id: str | None = None
+    configuration: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+    evidence: list[PlanEvidence] = Field(default_factory=list)
+    certainty: Certainty
+    confidence: ArtifactConfidence
+    status: RequirementStatus
+    notes: list[str] = Field(default_factory=list)
+
+
+class DataRequirement(StrictModel):
+    dataset_name: str
+    dataset_type: str | None = None
+    source: str | None = None
+    access_requirement: str | None = None
+    split: str | None = None
+    preprocessing: list[str] = Field(default_factory=list)
+    expected_format: str | None = None
+    local_path_if_documented: str | None = None
+    download_required: bool | None = None
+    evidence: list[PlanEvidence] = Field(default_factory=list)
+    certainty: Certainty
+    confidence: ArtifactConfidence
+    status: RequirementStatus
+    notes: list[str] = Field(default_factory=list)
+
+
+class ModelRequirement(StrictModel):
+    name: str
+    artifact_id: str | None = None
+    type: str
+    source: str | None = None
+    expected_format: str | None = None
+    required: bool = True
+    version: str | None = None
+    local_path: str | None = None
+    loading_method: str | None = None
+    evidence: list[PlanEvidence] = Field(default_factory=list)
+    certainty: Certainty
+    confidence: ArtifactConfidence
+    availability: RequirementStatus
+    notes: list[str] = Field(default_factory=list)
+
+
+class ConfigurationRequirement(StrictModel):
+    path: str
+    experiment_id: str
+    purpose: str | None = None
+    required: bool = True
+    relevant_parameters: list[str] = Field(default_factory=list)
+    evidence: list[PlanEvidence] = Field(default_factory=list)
+    certainty: Certainty
+    confidence: ArtifactConfidence
+    status: RequirementStatus
+
+
+class DependencyRequirement(StrictModel):
+    name: str
+    version_constraint: str | None = None
+    dependency_type: DependencyType
+    source_path: str | None = None
+    evidence: str | None = None
+    certainty: Certainty
+    status: RequirementStatus
+
+
+class HardwareRequirement(StrictModel):
+    category: str
+    value: str
+    source_path: str | None = None
+    evidence: str | None = None
+    certainty: Certainty
+    status: RequirementStatus
+
+
+class ReportedParameter(StrictModel):
+    name: str
+    value: str
+    unit: str | None = None
+    source: str
+    experiment_id: str
+    evidence: str
+    certainty: Certainty
+    confidence: ArtifactConfidence
+    status: ParameterStatus
+
+
+class ExpectedMetric(StrictModel):
+    metric_name: str
+    expected_value: float | None = None
+    unit: str | None = None
+    split: str | None = None
+    source: str
+    experiment_id: str
+    evidence: str
+    certainty: Certainty
+    confidence: ArtifactConfidence
+    result_kind: ResultKind = ResultKind.EXPECTED_REPORTED_RESULT
+
+
+class ReadinessAssessment(StrictModel):
+    overall_status: ReproductionPlanStatus
+    blocking_requirements: list[PlanIssue] = Field(default_factory=list)
+    missing_requirements: list[PlanIssue] = Field(default_factory=list)
+    unresolved_conflicts: list[PlanIssue] = Field(default_factory=list)
+    available_requirements: list[str] = Field(default_factory=list)
+    rationale: str
+    evidence: list[PlanEvidence] = Field(default_factory=list)
+
+
+class ReproductionPlan(StrictModel):
+    plan_id: str
+    experiment_id: str
+    artifact_id: str | None = None
+    environment_id: str | None = None
+    status: ReproductionPlanStatus
+    readiness: ReadinessAssessment
+    entrypoints: list[ExecutionStep] = Field(default_factory=list)
+    training_steps: list[ExecutionStep] = Field(default_factory=list)
+    evaluation_steps: list[ExecutionStep] = Field(default_factory=list)
+    inference_steps: list[ExecutionStep] = Field(default_factory=list)
+    data_requirements: list[DataRequirement] = Field(default_factory=list)
+    model_requirements: list[ModelRequirement] = Field(default_factory=list)
+    checkpoint_requirements: list[ModelRequirement] = Field(default_factory=list)
+    configuration_requirements: list[ConfigurationRequirement] = Field(default_factory=list)
+    dependency_requirements: list[DependencyRequirement] = Field(default_factory=list)
+    hardware_requirements: list[HardwareRequirement] = Field(default_factory=list)
+    input_requirements: list[ExecutionInput] = Field(default_factory=list)
+    output_requirements: list[ExecutionOutput] = Field(default_factory=list)
+    expected_metrics: list[ExpectedMetric] = Field(default_factory=list)
+    expected_results: list[ExpectedMetric] = Field(default_factory=list)
+    reported_parameters: list[ReportedParameter] = Field(default_factory=list)
+    commands: list[PlannedCommand] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list)
+    missing_requirements: list[PlanIssue] = Field(default_factory=list)
+    conflicts: list[PlanIssue] = Field(default_factory=list)
+    evidence: list[PlanEvidence] = Field(default_factory=list)
+    confidence: ArtifactConfidence
+    notes: list[str] = Field(default_factory=list)
+
+
+class ResearchDomain(str, Enum):
+    AI_ML = "AI_ML"
+    SOCIAL_SCIENCE = "SOCIAL_SCIENCE"
+    HUMANITIES = "HUMANITIES"
+    ENGINEERING = "ENGINEERING"
+    BIOLOGY = "BIOLOGY"
+    PHYSICS_CHEMISTRY = "PHYSICS_CHEMISTRY"
+    OTHER = "OTHER"
+    UNKNOWN = "UNKNOWN"
+
+
+class VerificationMethod(str, Enum):
+    COMPUTATIONAL_REPRODUCTION = "COMPUTATIONAL_REPRODUCTION"
+    STATISTICAL_VERIFICATION = "STATISTICAL_VERIFICATION"
+    DOCUMENTARY_VERIFICATION = "DOCUMENTARY_VERIFICATION"
+    QUALITATIVE_EVIDENCE_REVIEW = "QUALITATIVE_EVIDENCE_REVIEW"
+    EXPERIMENTAL_VERIFICATION = "EXPERIMENTAL_VERIFICATION"
+    HUMAN_EXPERT_VALIDATION = "HUMAN_EXPERT_VALIDATION"
+    MIXED_METHOD = "MIXED_METHOD"
+    UNKNOWN = "UNKNOWN"
+
+
+class VerificationStatus(str, Enum):
+    VERIFIABLE = "VERIFIABLE"
+    PARTIALLY_VERIFIABLE = "PARTIALLY_VERIFIABLE"
+    COMPUTATIONALLY_REPRODUCIBLE = "COMPUTATIONALLY_REPRODUCIBLE"
+    DOCUMENTARILY_VERIFIABLE = "DOCUMENTARILY_VERIFIABLE"
+    REQUIRES_HUMAN_VALIDATION = "REQUIRES_HUMAN_VALIDATION"
+    INACCESSIBLE = "INACCESSIBLE"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+    UNKNOWN = "UNKNOWN"
+
+
+class EvidenceType(str, Enum):
+    CODE = "CODE"
+    DATASET = "DATASET"
+    MODEL = "MODEL"
+    CHECKPOINT = "CHECKPOINT"
+    CONFIGURATION = "CONFIGURATION"
+    ENVIRONMENT = "ENVIRONMENT"
+    STATISTICAL_OUTPUT = "STATISTICAL_OUTPUT"
+    SURVEY_INSTRUMENT = "SURVEY_INSTRUMENT"
+    INTERVIEW_PROTOCOL = "INTERVIEW_PROTOCOL"
+    INTERVIEW_TRANSCRIPT = "INTERVIEW_TRANSCRIPT"
+    QUALITATIVE_CODING_FRAMEWORK = "QUALITATIVE_CODING_FRAMEWORK"
+    ARCHIVAL_SOURCE = "ARCHIVAL_SOURCE"
+    POLICY_DOCUMENT = "POLICY_DOCUMENT"
+    LITERATURE = "LITERATURE"
+    EXPERIMENTAL_PROTOCOL = "EXPERIMENTAL_PROTOCOL"
+    MEASUREMENT = "MEASUREMENT"
+    FIGURE = "FIGURE"
+    TABLE = "TABLE"
+    SUPPLEMENTARY_MATERIAL = "SUPPLEMENTARY_MATERIAL"
+    EXPERT_ASSESSMENT = "EXPERT_ASSESSMENT"
+    OTHER = "OTHER"
+
+
+class EvidenceRequirement(StrictModel):
+    requirement_id: str
+    claim_id: str | None = None
+    evidence_type: EvidenceType
+    description: str
+    status: RequirementStatus
+    source: str | None = None
+    certainty: Certainty = Certainty.UNKNOWN
+    notes: list[str] = Field(default_factory=list)
+
+
+class VerificationBoundary(StrictModel):
+    automatable_scope: list[str] = Field(default_factory=list)
+    requires_restricted_access: list[str] = Field(default_factory=list)
+    requires_human_validation: list[str] = Field(default_factory=list)
+    unverifiable_scope: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class ResearchCase(StrictModel):
+    case_id: str
+    domain: ResearchDomain
+    domain_confidence: ArtifactConfidence
+    claims: list[Claim] = Field(default_factory=list)
+    evidence_types: list[EvidenceType] = Field(default_factory=list)
+    verification_methods: list[VerificationMethod] = Field(default_factory=list)
+    verification_status: VerificationStatus
+    verification_boundary: VerificationBoundary
+    evidence_requirements: list[EvidenceRequirement] = Field(default_factory=list)
+    domain_evidence: list[str] = Field(default_factory=list)
+    reproduction_plan_ids: list[str] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
 
 class AnalyzePaperResponse(StrictModel):
     paper_text: str | None = None
@@ -411,5 +758,7 @@ class AnalyzePaperResponse(StrictModel):
     artifact_files: list[ArtifactFile] = Field(default_factory=list)
     experiment_artifact_maps: list[ExperimentArtifactMap] = Field(default_factory=list)
     environment_specifications: list[EnvironmentSpecification] = Field(default_factory=list)
+    reproduction_plans: list[ReproductionPlan] = Field(default_factory=list)
+    research_case: ResearchCase | None = None
     analysis_context: AnalysisContextDiagnostics | None = None
     extraction: ExtractionDiagnostics
