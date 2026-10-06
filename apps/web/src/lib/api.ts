@@ -164,7 +164,7 @@ export interface EnvironmentSpecification {
 }
 
 export type ReproductionPlanStatus = "READY_FOR_EXECUTION" | "PARTIALLY_READY" | "BLOCKED" | "UNKNOWN";
-export type RequirementStatus = "AVAILABLE" | "MISSING" | "INACCESSIBLE" | "CONFLICTING" | "UNKNOWN" | "UNSUPPORTED";
+export type RequirementStatus = "IDENTIFIED" | "AVAILABLE" | "PARTIALLY_AVAILABLE" | "MISSING" | "INACCESSIBLE" | "CONFLICTING" | "UNKNOWN" | "UNSUPPORTED";
 export type CommandSafety = "SAFE_TO_PLAN" | "REQUIRES_REVIEW" | "UNSAFE_TO_EXECUTE" | "UNKNOWN";
 
 export interface PlanEvidence {
@@ -257,6 +257,157 @@ export interface ReproductionPlan {
   notes: string[];
 }
 
+export interface ReproductionTarget {
+  target_id: string;
+  plan_id: string;
+  experiment_id: string;
+  paper_title: string | null;
+  objective: string;
+  eligible: boolean;
+  selected: boolean;
+  selection_rank: number | null;
+  selection_score: {
+    total: number;
+    maximum: number;
+    dimensions: Array<{ name: string; satisfied: boolean; points: number; evidence: string }>;
+  };
+  dataset: ReproductionPlan["data_requirements"][number] | null;
+  dataset_version: string | null;
+  model: ReproductionPlan["model_requirements"][number] | null;
+  model_version: string | null;
+  checkpoint: ReproductionPlan["checkpoint_requirements"][number] | null;
+  metric: string | null;
+  evaluation_protocol: string | null;
+  published_result: {
+    metric_name: string;
+    reported_value: number;
+    unit: string | null;
+    source_location: string | null;
+    source_claim_id: string | null;
+    evidence: string;
+    certainty: string;
+    result_kind: "PUBLISHED_RESULT";
+  } | null;
+  observed_result: { status: "NOT_AVAILABLE"; value: null; notes: string[] };
+  baseline: string | null;
+  random_seed: string | null;
+  repeated_runs: string | null;
+  code_artifact_id: string | null;
+  relevant_files: string[];
+  file_mappings: ArtifactFile[];
+  configuration_files: string[];
+  environment_id: string | null;
+  environment_status: string | null;
+  environment_specification: EnvironmentSpecification | null;
+  dependency_requirements: ReproductionPlan["dependency_requirements"];
+  hardware_requirements: ReproductionPlan["hardware_requirements"];
+  documented_command: PlannedCommand | null;
+  documented_command_phase: string | null;
+  required_inputs: string[];
+  missing_requirements: PlanIssue[];
+  evidence: PlanEvidence[];
+  certainty: string;
+  readiness_status: ReproductionPlanStatus;
+  selection_reason: string;
+  notes: string[];
+}
+
+export interface ReproductionTargetSelection {
+  candidate_targets: ReproductionTarget[];
+  selected_target_id: string | null;
+  selected_target: ReproductionTarget | null;
+  selection_method: string;
+  notes: string[];
+}
+
+export type ExecutionStatus = "PENDING_APPROVAL" | "APPROVED" | "QUEUED" | "VALIDATING" | "STAGING" | "SANDBOX_CREATING" | "EXECUTING" | "COLLECTING" | "COMPLETED" | "FAILED" | "BLOCKED" | "CANCELLED" | "TIMED_OUT" | "INTERRUPTED";
+
+export interface ExecutionPolicy {
+  cpu_limit: number;
+  memory_limit_mb: number;
+  runtime_limit_seconds: number;
+  process_limit: number;
+  storage_limit_mb: number;
+  output_limit_mb: number;
+  log_limit_kb: number;
+  network_policy: "NETWORK_DISABLED";
+  gpu_policy: "GPU_DISABLED";
+  container_image: string;
+}
+
+export interface ExecutionApproval {
+  approval_id: string;
+  target_id: string;
+  approver: string;
+  status: "APPROVED" | "REJECTED";
+  approved_at: string;
+  target_hash: string;
+  policy_hash: string;
+  artifact_hash: string;
+}
+
+export interface ExecutionRecord {
+  run_id: string;
+  target_id: string;
+  experiment_id: string;
+  artifact_id: string | null;
+  artifact_source: string | null;
+  artifact_commit: string | null;
+  artifact_hash: string | null;
+  environment_id: string | null;
+  execution_type: "ORIGINAL" | "DIAGNOSTIC" | "MODIFIED" | "HYPOTHESIS_TEST";
+  approval_id: string | null;
+  approved_by: string | null;
+  timestamp_started: string;
+  timestamp_finished: string;
+  command: string | null;
+  executable: string | null;
+  arguments: string[];
+  working_directory: string;
+  inputs: Array<{ artifact_id: string; name: string; sandbox_path: string; sha256: string; size_bytes: number }>;
+  outputs: Array<{ name: string; sandbox_path: string; sha256: string; size_bytes: number; output_type: string; provenance: string }>;
+  stdout: string;
+  stderr: string;
+  stdout_truncated: boolean;
+  stderr_truncated: boolean;
+  exit_code: number | null;
+  runtime_seconds: number;
+  resource_policy: ExecutionPolicy;
+  sandbox: { technology: string; image: string; image_id: string | null; root_filesystem_read_only: boolean; network_disabled: boolean; non_root_user: string; capabilities_dropped: boolean; no_new_privileges: boolean; host_pid_namespace: boolean; host_ipc_namespace: boolean; privileged: boolean; gpu_exposed: boolean };
+  status: ExecutionStatus;
+  failure_code: string | null;
+  failure_reason: string | null;
+  timed_out: boolean;
+  resource_limit_exceeded: boolean;
+  provenance: string[];
+  observed_result: {
+    status: string;
+    metric_name: string | null;
+    value: number | null;
+    source_location: string | null;
+    extraction_method: string | null;
+  } | null;
+  comparison: {
+    comparison_status: string;
+    reproduction_status: string;
+    absolute_difference: number | null;
+    tolerance: number | null;
+  } | null;
+}
+
+export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
+  cpu_limit: 1,
+  memory_limit_mb: 512,
+  runtime_limit_seconds: 120,
+  process_limit: 32,
+  storage_limit_mb: 128,
+  output_limit_mb: 64,
+  log_limit_kb: 256,
+  network_policy: "NETWORK_DISABLED",
+  gpu_policy: "GPU_DISABLED",
+  container_image: "python:3.12-slim",
+};
+
 export type ResearchDomain =
   | "AI_ML"
   | "SOCIAL_SCIENCE"
@@ -348,6 +499,7 @@ export interface AnalysisResponse {
   experiment_artifact_maps: ExperimentArtifactMap[];
   environment_specifications: EnvironmentSpecification[];
   reproduction_plans: ReproductionPlan[];
+  reproduction_targets: ReproductionTargetSelection;
   research_case: ResearchCase | null;
   analysis_context: AnalysisContextDiagnostics | null;
   extraction: { page_count: number; character_count: number; };
@@ -355,6 +507,60 @@ export interface AnalysisResponse {
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const ANALYSIS_TIMEOUT_MS = 3 * 60 * 1000;
+
+function apiErrorDetail(body: unknown, fallback: string): string {
+  if (!body || typeof body !== "object" || !("detail" in body)) return fallback;
+  const detail = (body as { detail?: unknown }).detail;
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object" && "reason" in detail) {
+    return String((detail as { reason: unknown }).reason);
+  }
+  return fallback;
+}
+
+export async function approveReproduction(
+  targetId: string,
+  approver: string,
+  policy: ExecutionPolicy = DEFAULT_EXECUTION_POLICY,
+): Promise<ExecutionApproval> {
+  const response = await fetch(`${API_URL}/api/v1/reproduction/${encodeURIComponent(targetId)}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approver, policy }),
+  });
+  const body = await response.json().catch(() => null) as ExecutionApproval | unknown;
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The target could not be approved."));
+  return body as ExecutionApproval;
+}
+
+export async function executeReproduction(
+  targetId: string,
+  approvalId: string,
+  policy: ExecutionPolicy = DEFAULT_EXECUTION_POLICY,
+): Promise<ExecutionRecord> {
+  const response = await fetch(`${API_URL}/api/v1/reproduction/${encodeURIComponent(targetId)}/execute?asynchronous=true`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approval_id: approvalId, policy }),
+  });
+  const body = await response.json().catch(() => null) as ExecutionRecord | unknown;
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The sandbox execution request failed."));
+  return body as ExecutionRecord;
+}
+
+export async function getReproductionRun(targetId: string, runId: string): Promise<ExecutionRecord> {
+  const response = await fetch(`${API_URL}/api/v1/reproduction/${encodeURIComponent(targetId)}/runs/${encodeURIComponent(runId)}`);
+  const body = await response.json().catch(() => null) as ExecutionRecord | unknown;
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The run could not be loaded."));
+  return body as ExecutionRecord;
+}
+
+export async function cancelReproductionRun(targetId: string, runId: string): Promise<ExecutionRecord> {
+  const response = await fetch(`${API_URL}/api/v1/reproduction/${encodeURIComponent(targetId)}/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" });
+  const body = await response.json().catch(() => null) as ExecutionRecord | unknown;
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The run could not be cancelled."));
+  return body as ExecutionRecord;
+}
 
 export async function analyzePaper(file: File, stage: 'citation' | 'all' = 'all'): Promise<AnalysisResponse> {
   const formData = new FormData(); formData.append("file", file);
@@ -385,6 +591,10 @@ export async function analyzePaper(file: File, stage: 'citation' | 'all' = 'all'
     experiment_artifact_maps: result.experiment_artifact_maps ?? [],
     environment_specifications: result.environment_specifications ?? [],
     reproduction_plans: result.reproduction_plans ?? [],
+    reproduction_targets: result.reproduction_targets ?? {
+      candidate_targets: [], selected_target_id: null, selected_target: null,
+      selection_method: "Deterministic evidence coverage ranking.", notes: [],
+    },
     research_case: result.research_case ?? null,
     analysis_context: result.analysis_context ?? null,
   };
@@ -416,8 +626,157 @@ export async function analyzeEnvironment(analysis: object, paperText: string): P
     experiment_artifact_maps: result.experiment_artifact_maps ?? [],
     environment_specifications: result.environment_specifications ?? [],
     reproduction_plans: result.reproduction_plans ?? [],
+    reproduction_targets: result.reproduction_targets ?? {
+      candidate_targets: [], selected_target_id: null, selected_target: null,
+      selection_method: "Deterministic evidence coverage ranking.", notes: [],
+    },
     research_case: result.research_case ?? null,
     analysis_context: null,
     extraction: { page_count: 0, character_count: 0 }
   };
 }
+
+
+export interface DiagnosticApproval {
+  approval_id: string;
+  diagnostic_plan_id: string;
+  investigation_id: string;
+  target_id: string;
+  baseline_run_id: string;
+  context_hash: string;
+  artifact_manifest_hash: string;
+  environment_hash: string;
+  policy_hash: string;
+  diagnostic_plan_hash: string;
+  approved_by: string;
+  approved_at: string;
+  status: string;
+}
+
+export interface DiagnosticExecution {
+  diagnostic_execution_id: string;
+  investigation_id: string;
+  diagnostic_plan_id: string;
+  target_id: string;
+  baseline_run_id: string;
+  execution_type: string;
+  status: string;
+  outcome: string | null;
+  context_hash: string;
+  baseline_manifest_hash: string;
+  diagnostic_manifest_hash: string | null;
+  modification_hash: string | null;
+  sandbox_run_id: string | null;
+  observed_result_id: string | null;
+  decision_result: string | null;
+  decision_reason: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  failed_at: string | null;
+  cancelled_at: string | null;
+}
+
+export async function approveDiagnostic(
+  targetId: string,
+  baselineRunId: string,
+  plan: Record<string, unknown>,
+): Promise<DiagnosticApproval> {
+  const response = await fetch(`${API_URL}/api/v1/diagnostic/${encodeURIComponent(targetId)}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ baseline_run_id: baselineRunId, plan }),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The diagnostic could not be approved."));
+  return body as DiagnosticApproval;
+}
+
+export async function executeDiagnostic(
+  targetId: string,
+  approvalId: string,
+  plan: Record<string, unknown>,
+  policy: ExecutionPolicy = DEFAULT_EXECUTION_POLICY,
+): Promise<DiagnosticExecution> {
+  const response = await fetch(`${API_URL}/api/v1/diagnostic/${encodeURIComponent(targetId)}/execute`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approval_id: approvalId, plan, policy }),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The diagnostic execution request failed."));
+  return body as DiagnosticExecution;
+}
+
+export async function getDiagnosticExecution(targetId: string, executionId: string): Promise<DiagnosticExecution> {
+  const response = await fetch(`${API_URL}/api/v1/diagnostic/${encodeURIComponent(targetId)}/runs/${encodeURIComponent(executionId)}`);
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The diagnostic run could not be loaded."));
+  return body as DiagnosticExecution;
+}
+
+export interface HypothesisTest {
+  id: string;
+  hypothesis_id: string;
+  investigation_id: string;
+  diagnostic_plan_id: string;
+  diagnostic_execution_id: string;
+  baseline_observed_result_id: string;
+  diagnostic_observed_result_id: string | null;
+  diagnostic_outcome: string;
+  decision_rule: string;
+  decision_result: string | null;
+  evidence_strength: string;
+  prior_status: string;
+  resulting_status: string;
+  decision_reason: string;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface Hypothesis {
+  hypothesis_id: string;
+  discrepancy_id: string;
+  statement: string;
+  category: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DiscrepancyInvestigation {
+  investigation_id: string;
+  target_id: string;
+  status: string;
+  hypotheses: Hypothesis[];
+  created_at: string;
+}
+
+export async function evaluateDiagnostic(targetId: string, executionId: string): Promise<HypothesisTest> {
+  const response = await fetch(`${API_URL}/api/v1/diagnostic/${encodeURIComponent(targetId)}/runs/${encodeURIComponent(executionId)}/evaluate`, { method: "POST" });
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The diagnostic evaluation failed."));
+  return body as HypothesisTest;
+}
+
+export async function getHypothesis(targetId: string, hypothesisId: string): Promise<Hypothesis> {
+  const response = await fetch(`${API_URL}/api/v1/diagnostic/${encodeURIComponent(targetId)}/hypotheses/${encodeURIComponent(hypothesisId)}`);
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The hypothesis could not be loaded."));
+  return body as Hypothesis;
+}
+
+export async function getHypothesisTests(targetId: string, hypothesisId: string): Promise<HypothesisTest[]> {
+  const response = await fetch(`${API_URL}/api/v1/diagnostic/${encodeURIComponent(targetId)}/hypotheses/${encodeURIComponent(hypothesisId)}/tests`);
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The hypothesis tests could not be loaded."));
+  return body as HypothesisTest[];
+}
+
+export async function listInvestigations(targetId: string): Promise<DiscrepancyInvestigation[]> {
+  const response = await fetch(`${API_URL}/api/v1/diagnostic/${encodeURIComponent(targetId)}/investigations`);
+  const body = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(apiErrorDetail(body, "The investigations could not be loaded."));
+  return body as DiscrepancyInvestigation[];
+}
+
