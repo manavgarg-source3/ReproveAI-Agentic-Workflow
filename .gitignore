@@ -10,3 +10,7 @@ node_modules/
 .next/
 out/
 
+# Local runtime and manual-test artifacts
+*.log
+/apps/api/test_social_science.pdf
+
