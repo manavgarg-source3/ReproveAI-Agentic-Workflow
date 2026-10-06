@@ -88,7 +88,13 @@ class GeminiClaimEvidenceProvider:
         )
         self._client = client or genai.Client(
             api_key=resolved_key,
-            http_options=types.HttpOptions(timeout=int(self.timeout_seconds * 1000)),
+            http_options=types.HttpOptions(
+                timeout=int(self.timeout_seconds * 1000),
+                retry_options=types.HttpRetryOptions(
+                    attempts=1,
+                    http_status_codes=[408, 500, 502, 503, 504],
+                ),
+            ),
         )
 
     def close(self) -> None:
