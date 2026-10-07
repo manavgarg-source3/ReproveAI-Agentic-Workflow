@@ -46,11 +46,45 @@ def _same_claim(left: Claim, right: Claim) -> bool:
 
 
 def _same_experiment(left: Experiment, right: Experiment) -> bool:
-    comparable = ("dataset", "model", "metric", "reported_result")
-    if any(getattr(left, field) != getattr(right, field) for field in comparable):
+    # A baseline is comparison metadata, not part of the evaluated target's
+    # identity.  Chunked extraction often names the baseline in one occurrence
+    # and calls the same row "our method" in another.
+    comparable = ("dataset", "split", "model", "metric", "reported_result")
+    if any(
+        getattr(left, field) is not None
+        and getattr(right, field) is not None
+        and _normalized(str(getattr(left, field))) != _normalized(str(getattr(right, field)))
+        for field in comparable
+    ):
+        return False
+    # Do not collapse otherwise-similar experiment descriptions that explicitly
+    # use different images-per-class settings.
+    setting_pattern = r"\b(\d+)\s+images?\s*(?:/|per)\s*class\b"
+    left_setting = re.search(setting_pattern, left.objective, re.IGNORECASE)
+    right_setting = re.search(setting_pattern, right.objective, re.IGNORECASE)
+    if left_setting and right_setting and left_setting.group(1) != right_setting.group(1):
+        return False
+    shared_identity = any(
+        getattr(left, field) is not None
+        and getattr(right, field) is not None
+        for field in ("dataset", "model", "metric")
+    )
+    if not shared_identity:
         return False
     left_text, right_text = _normalized(left.objective), _normalized(right.objective)
-    return left_text == right_text or token_set_ratio(left_text, right_text) >= 96.0
+    return left_text == right_text or token_set_ratio(left_text, right_text) >= 92.0
+
+
+def _merge_experiment(left: Experiment, right: Experiment) -> Experiment:
+    updates = {
+        field: getattr(left, field) if getattr(left, field) is not None else getattr(right, field)
+        for field in ("dataset", "split", "model", "metric", "baseline", "reported_result")
+    }
+    updates["objective"] = max((left.objective, right.objective), key=len)
+    updates["evidence_locations"] = _merge_locations(
+        left.evidence_locations, right.evidence_locations
+    )
+    return left.model_copy(update=updates)
 
 
 def _merge_locations(left: list[str], right: list[str]) -> list[str]:
@@ -112,7 +146,7 @@ def merge_research_analyses(analyses: list[ResearchAnalysis], *, deterministic_r
                 experiments.append(candidate)
             else:
                 index = experiments.index(duplicate)
-                experiments[index] = duplicate.model_copy(update={"evidence_locations": _merge_locations(duplicate.evidence_locations, candidate.evidence_locations)})
+                experiments[index] = _merge_experiment(duplicate, candidate)
     experiments = [item.model_copy(update={"id": f"experiment_{index}"}) for index, item in enumerate(experiments, start=1)]
 
     methods: list[str] = []
@@ -138,6 +172,29 @@ def merge_research_analyses(analyses: list[ResearchAnalysis], *, deterministic_r
     return ResearchAnalysis(paper=paper, claims=claims, experiments=experiments, methods=methods, references=references)
 
 
+def _enrich_explicit_global_protocols(
+    analysis: ResearchAnalysis, text: str
+) -> ResearchAnalysis:
+    """Propagate an explicit global split statement to matching result records."""
+
+    standard_train_test = bool(re.search(
+        r"\b(?:use|using|used)\s+(?:the\s+)?standard\s+train\s*/\s*test\s+splits?\b",
+        text,
+        re.IGNORECASE,
+    ))
+    if not standard_train_test:
+        return analysis
+    experiments = []
+    for experiment in analysis.experiments:
+        result_text = f"{experiment.objective} {experiment.metric or ''}"
+        if experiment.split is None and re.search(
+            r"\b(?:test|testing)\b", result_text, re.IGNORECASE
+        ):
+            experiment = experiment.model_copy(update={"split": "test"})
+        experiments.append(experiment)
+    return analysis.model_copy(update={"experiments": experiments})
+
+
 def analyze_research_document(text: str, pages: tuple[str, ...] = (), provider: ResearchLLMProvider | None = None) -> ResearchAnalysisRun:
     """Preprocess full text, analyze unique chunks, and merge with deterministic references."""
 
@@ -156,8 +213,11 @@ def analyze_research_document(text: str, pages: tuple[str, ...] = (), provider: 
             active_provider.close()
 
     deterministic_references = extract_references_from_document(text)
+    merged = merge_research_analyses(
+        outputs, deterministic_references=deterministic_references
+    )
     return ResearchAnalysisRun(
-        analysis=merge_research_analyses(outputs, deterministic_references=deterministic_references),
+        analysis=_enrich_explicit_global_protocols(merged, text),
         diagnostics=prepared.diagnostics,
     )
 

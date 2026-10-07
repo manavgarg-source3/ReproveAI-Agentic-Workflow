@@ -81,12 +81,16 @@ class ScopusClient:
             return []
 
         if author:
-            clean_author = author.split(";")[0].split(",")[0].strip()
+            first_author = author.split(";")[0].strip()
+            if "," in first_author:
+                clean_author = first_author.split(",", 1)[0].strip()
+            else:
+                clean_author = first_author.split()[-1].strip()
             query = f'TITLE("{clean_title[:100]}") AND AUTH("{clean_author}")'
         else:
             query = f'TITLE("{clean_title[:100]}")'
 
-        cache_key = f"{query}__count_{count}"
+        cache_key = f"v2__{query}__count_{count}"
         cached = self.cache.get("scopus_search", cache_key)
         if cached is not None:
             return cached.get("items", [])

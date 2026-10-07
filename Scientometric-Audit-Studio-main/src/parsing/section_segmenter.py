@@ -20,6 +20,9 @@ REFERENCE_HEADING_PATTERNS = [
 # Sections that commonly appear AFTER references and must be stripped from bibliography
 TRAILING_SECTION_PATTERNS = [
     r'(?im)^\s*(?:(?:Section\s+)?[0-9IVXLCDM]+\.?\s*)?(?:Appendix|Appendices|Appendix\s+[A-Z0-9]+)\b',
+    # PDF small-caps can be extracted as ``A L ARGE ...`` or ``B I NFERENCE ...``.
+    # The leading letter is the appendix label, so it ends the bibliography.
+    r'(?m)^\s*[A-Z]\s+[A-Z]\s*[A-Z]{2,}(?:\s+[A-Z][A-Z]+){1,}\s*$',
     r'(?im)^\s*(?:About the Authors?|Author Biographies?|Biographies|Author Information)\b',
     r'(?im)^\s*(?:Author Contributions?|Authors\' Contributions?|Credit Authorship)\b',
     r'(?im)^\s*(?:Acknowledgments?|Acknowledgements?|Funding Information|Financial Disclosure)\b',

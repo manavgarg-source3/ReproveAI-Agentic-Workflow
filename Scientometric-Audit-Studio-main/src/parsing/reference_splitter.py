@@ -117,8 +117,9 @@ class ReferenceSplitter:
                 return cls._subsplit_inline_numbered_references(clean_parts)
 
         # Check 2A: Dotted numbers e.g. 1. , 2. at line starts
-        dot_matches = list(re.finditer(r'(?m)^\s*\d+\.\s+', text))
-        if len(dot_matches) >= 2:
+        dot_matches = list(re.finditer(r'(?m)^\s*(\d+)\.\s+', text))
+        dot_numbers = [int(match.group(1)) for match in dot_matches]
+        if len(dot_matches) >= 2 and dot_numbers[:2] == [1, 2]:
             parts = re.split(r'(?m)(?=^\s*\d+\.\s+)', text)
             clean_parts = [re.sub(r'\s+', ' ', p).strip() for p in parts if len(p.strip()) > 15]
             if len(clean_parts) >= 2:
@@ -126,7 +127,8 @@ class ReferenceSplitter:
 
         # Check 2B: Dotted numbers anywhere in the text (e.g. "...doi:xxx 2. Smith" or " 2. Jones")
         inline_dot_matches = list(re.finditer(r'(?:^|(?<=[\.\s\>\)\]\"\”\’]))\s*(\d{1,3})\.\s+(?=[A-Z\u00C0-\u024F\"\“])', text))
-        if len(inline_dot_matches) >= 2:
+        inline_dot_numbers = [int(match.group(1)) for match in inline_dot_matches]
+        if len(inline_dot_matches) >= 2 and inline_dot_numbers[:2] == [1, 2]:
             parts = re.split(r'(?=(?:^|(?<=[\.\s\>\)\]\"\”\’]))\s*\d{1,3}\.\s+(?:[A-Z\u00C0-\u024F\"\“]))', text)
             clean_parts = [re.sub(r'\s+', ' ', p).strip() for p in parts if len(p.strip()) > 15]
             if len(clean_parts) >= 2:
@@ -170,6 +172,18 @@ class ReferenceSplitter:
         Splits unnumbered author-date style reference sections (e.g. APA, Harvard, Chicago, Taylor & Francis).
         Accurately detects boundaries between multi-line bibliographic entries.
         """
+        # PDF extraction can place the end of one citation and the next author
+        # on the same physical line. Restore only high-confidence boundaries:
+        # terminal year + a mixed-case personal name. This deliberately avoids
+        # splitting continuations such as "2009. IEEE Conference ...".
+        text = re.sub(
+            r'((?:18|19|20)\d{2}[a-z]?\.)\s+(?='
+            r'[A-Z][a-z][A-Za-z\'\-]*(?:\s+(?:[A-Z]\.|[A-Z][a-z][A-Za-z\'\-]*)){1,5}'
+            r'(?:(?:\s+et\s+al\.)|\.|,|\s+and\s+))',
+            r'\1\n',
+            text,
+        )
+
         clean_lines = []
         for l in text.splitlines():
             l_str = l.strip()
@@ -191,7 +205,7 @@ class ReferenceSplitter:
             ))
             # Pattern B: Known corporate authors e.g. Google, WHO, IEEE, NIST, etc.
             is_corporate_start = bool(re.match(
-                r'^(?:Google|World\s+Health\s+Organization|National\s+Institutes\s+of\s+Health|IEEE|ACM|APA|ISO|W3C|National\s+Research\s+Council)\b',
+                r'^(?:Google|World\s+Health\s+Organization|National\s+Institutes\s+of\s+Health|IEEE(?!\s+(?:Conference|Transactions|Journal)\b)|ACM|APA|ISO|W3C|National\s+Research\s+Council)\b',
                 l, re.IGNORECASE
             ))
             # Pattern C: Author surname, Given name without year on first line
@@ -214,7 +228,71 @@ class ReferenceSplitter:
         if current:
             entries.append(' '.join(current))
 
-        return [re.sub(r'\s+', ' ', e).strip() for e in entries if len(e.strip()) > 15]
+        entries = [re.sub(r'\s+', ' ', e).strip() for e in entries if len(e.strip()) > 15]
+        standard_entries = entries
+
+        # Conference/arXiv bibliographies commonly place the year near the end
+        # of an entry rather than immediately after the authors. Preserve PDF
+        # line wrapping and split only at a plausible author boundary after the
+        # previous citation has reached a terminal year, URL, or identifier.
+        def looks_like_author_start(line: str) -> bool:
+            if not line or re.fullmatch(r"\d{1,3}", line):
+                return False
+            if re.match(
+                r"^(?:IEEE|ACM)\s+(?:Conference|Transactions|Journal)\b",
+                line,
+                re.IGNORECASE,
+            ):
+                return False
+            # Do not split on ``. `` here: initials such as ``Tom B. Brown``
+            # occur before the author-list boundary.
+            first_clause = line[:320]
+            single_author = bool(re.match(
+                r"^[A-Z][a-z][A-Za-z'\-]+(?:\s+[A-Z]\.)?\s+"
+                r"[A-Z][a-z][A-Za-z'\-]+(?:\s+et\s+al)?\.\s+[A-Z]",
+                first_clause,
+            ))
+            if single_author:
+                return True
+            if len(first_clause) > 320 or not (
+                "," in first_clause or " and " in first_clause
+            ):
+                return False
+            first_name = first_clause.split(",", 1)[0].split(" and ", 1)[0].strip()
+            tokens = first_name.split()
+            return (
+                2 <= len(tokens) <= 7
+                and first_name[:1].isupper()
+                and not any(character.isdigit() for character in first_name)
+            )
+
+        def citation_complete(parts: List[str]) -> bool:
+            value = " ".join(parts).strip()
+            return bool(
+                re.search(r"(?<!\d)(?:18|19|20)\d{2}[a-z]?\.\s*$", value, re.I)
+                or re.search(r"(?:arxiv\.org|doi\.org|aclanthology\.org)/\S+\.?\s*$", value, re.I)
+                or re.search(r"\b(?:a|b)\.\s*$", value)
+                or re.search(r"\d{4,9}\.\s*$", value)
+                or (re.search(r"https?://", value, re.I) and re.search(r"\d+\.\s*$", value))
+            )
+
+        entries = []
+        current = []
+        for line in clean_lines:
+            if re.fullmatch(r"\d{1,3}", line):
+                continue
+            if current and looks_like_author_start(line) and citation_complete(current):
+                entries.append(" ".join(current))
+                current = [line]
+            else:
+                current.append(line)
+        if current:
+            entries.append(" ".join(current))
+
+        wrapped_entries = [re.sub(r'\s+', ' ', e).strip() for e in entries if len(e.strip()) > 15]
+        if len(wrapped_entries) > len(standard_entries):
+            return wrapped_entries
+        return standard_entries
 
     @classmethod
     def split(

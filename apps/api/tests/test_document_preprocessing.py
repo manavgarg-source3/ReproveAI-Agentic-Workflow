@@ -54,6 +54,9 @@ def test_section_classification_handles_non_exact_titles() -> None:
     assert classify_section("Results and Discussion") == SectionType.RESULTS
     assert classify_section("Model Architecture and Training") == SectionType.MODEL
     assert classify_section("Literature Review") == SectionType.RELATED_WORK
+    assert classify_section("2.3 D ATASET CONDENSATION WITH GRADIENT MATCHING") == SectionType.METHODS
+    assert classify_section("3 E XPERIMENTS") == SectionType.EXPERIMENTS
+    assert classify_section("4 R ESULTS AND DISCUSSION") == SectionType.RESULTS
 
 
 def test_false_heading_rejection_for_tables_captions_authors_and_references() -> None:

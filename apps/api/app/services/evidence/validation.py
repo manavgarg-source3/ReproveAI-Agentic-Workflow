@@ -16,6 +16,7 @@ from app.schemas.research import (
 )
 from app.services.evidence.citation_mapper import CitationAssociation, CitationMapper
 from app.services.evidence.gemini import GeminiClaimEvidenceProvider
+from app.services.evidence.paper_source import PaperEvidenceMapper
 from app.services.evidence.provider import ClaimEvidenceProvider, SourceEvidenceProvider
 from app.services.evidence.scientometric_source import ScientometricSourceEvidenceProvider
 
@@ -95,6 +96,11 @@ def validate_claim_evidence(
     assessments: list[ClaimEvidenceAssessment] = []
     owned_alignment_provider = alignment_provider is None
     aligner = alignment_provider
+    try:
+        paper_mapper = PaperEvidenceMapper(paper_text)
+    except Exception:
+        logger.exception("Uploaded-paper evidence mapping unavailable")
+        paper_mapper = None
 
     try:
         import concurrent.futures
@@ -103,13 +109,49 @@ def validate_claim_evidence(
             claim_evidence_items = []
             claim_associations = associations.get(claim.id, [])
             if not claim_associations:
+                paper_match = paper_mapper.find(claim) if paper_mapper is not None else None
+                if paper_match is not None:
+                    evidence_id = f"evidence-{claim.id}-paper"
+                    item = EvidenceItem(
+                        evidence_id=evidence_id,
+                        claim_id=claim.id,
+                        evidence_type="PAPER_EXCERPT",
+                        source="uploaded paper",
+                        source_title=analysis.paper.title or "Uploaded paper",
+                        excerpt=paper_match.excerpt,
+                        citation_location=paper_match.location,
+                        relevance=EvidenceRelevance.HIGH,
+                        directness=EvidenceDirectness.DIRECT,
+                        quality=EvidenceQuality.SOURCE_EXCERPT,
+                        classification=EvidenceClassification.AUTHOR_CLAIM,
+                    )
+                    assessment = ClaimEvidenceAssessment(
+                        claim_id=claim.id,
+                        citation_status=CitationStatus.NO_ASSOCIATED_CITATION,
+                        reference_ids=[],
+                        required_evidence=[],
+                        support_status=ClaimSupportStatus.SUPPORTED,
+                        evidence_ids=[evidence_id],
+                        confidence=EvidenceRelevance.HIGH,
+                        explanation=(
+                            "The uploaded paper explicitly reports this claim in the supplied "
+                            "paper excerpt. This confirms textual support within the paper; it "
+                            "does not independently establish scientific truth."
+                        ),
+                        unresolved_questions=[],
+                        requires_human_review=False,
+                    )
+                    return claim.id, [item], assessment
                 return claim.id, claim_evidence_items, _unavailable_assessment(
                     claim.id,
                     citation_status=CitationStatus.NO_ASSOCIATED_CITATION,
                     reference_ids=[],
                     evidence_ids=[],
-                    explanation="No citation markers were found associated with this claim in the text.",
-                    unresolved_questions=["What is the source for this claim?"],
+                    explanation=(
+                        "No external citation was associated with this claim, and no sufficiently "
+                        "similar supporting passage was located in the uploaded paper."
+                    ),
+                    unresolved_questions=["Where in the paper is this claim supported?"],
                 )
 
             reference_ids = []

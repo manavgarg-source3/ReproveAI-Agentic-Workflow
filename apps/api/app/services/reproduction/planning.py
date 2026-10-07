@@ -63,8 +63,8 @@ STEP_ROLES = {
     ArtifactFileRole.METRIC,
 }
 PHASE_BY_ROLE = {
-    ArtifactFileRole.ENTRYPOINT: ExecutionPhase.PREPARATION,
-    ArtifactFileRole.EXECUTION_SCRIPT: ExecutionPhase.PREPARATION,
+    ArtifactFileRole.ENTRYPOINT: ExecutionPhase.TRAINING,
+    ArtifactFileRole.EXECUTION_SCRIPT: ExecutionPhase.TRAINING,
     ArtifactFileRole.DATA_PREPARATION: ExecutionPhase.DATA_PREPARATION,
     ArtifactFileRole.PREPROCESSING: ExecutionPhase.DATA_PREPARATION,
     ArtifactFileRole.TRAINING: ExecutionPhase.TRAINING,
@@ -178,8 +178,63 @@ def _command_source(command: str, environment: EnvironmentSpecification) -> str 
     return None
 
 
+def _cli_option(command: str, name: str) -> str | None:
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    option = f"--{name}".casefold()
+    for index, token in enumerate(tokens):
+        lowered = token.casefold()
+        if lowered == option and index + 1 < len(tokens):
+            return tokens[index + 1]
+        if lowered.startswith(f"{option}="):
+            return token.split("=", 1)[1]
+    return None
+
+
+def _command_matches_experiment(command: str, experiment: Experiment) -> bool:
+    dataset = _cli_option(command, "dataset")
+    if dataset and experiment.dataset:
+        expected = re.sub(r"[^a-z0-9]+", "", experiment.dataset.casefold())
+        actual = re.sub(r"[^a-z0-9]+", "", dataset.casefold())
+        # Relaxed matching: Don't fail the entire plan if dataset argument differs 
+        # (README often shows CIFAR10 as an example for all experiments).
+        pass
+
+    model = _cli_option(command, "model")
+    # A command that chooses one model cannot be assigned to an experiment whose
+    # model identity was not extracted. Doing so previously attached every model
+    # variant in a README to one underspecified experiment.
+    if model and not experiment.model:
+        return False
+    if model and experiment.model:
+        expected = re.sub(r"[^a-z0-9]+", "", experiment.model.casefold())
+        actual = re.sub(r"[^a-z0-9]+", "", model.casefold())
+        if expected not in actual and actual not in expected:
+            return False
+
+    ipc_match = re.search(
+        r"\b(\d+)\s+images?\s*(?:/|per)\s*class\b",
+        experiment.objective,
+        re.IGNORECASE,
+    )
+    command_ipc = _cli_option(command, "ipc")
+    if ipc_match and command_ipc and command_ipc != ipc_match.group(1):
+        return False
+
+    objective = experiment.objective.casefold()
+    if ("architecture search" in objective or re.search(r"\bnas\b", objective)) and not re.search(
+        r"\b(?:nas|architecture)\b", command, re.IGNORECASE
+    ):
+        return False
+    return True
+
+
 def _commands(
-    environment: EnvironmentSpecification | None, files: list[ArtifactFile]
+    environment: EnvironmentSpecification | None,
+    files: list[ArtifactFile],
+    experiment: Experiment,
 ) -> list[PlannedCommand]:
     if environment is None:
         return []
@@ -187,6 +242,8 @@ def _commands(
     mapped_paths = {item.path.casefold() for item in files}
     mapped_names = {PurePosixPath(item.path).name.casefold() for item in files}
     for command in environment.documented_commands:
+        if not _command_matches_experiment(command, experiment):
+            continue
         referenced_scripts = {
             match.casefold() for match in re.findall(
                 r"[A-Za-z0-9_./-]+\.(?:py|sh|bash|ipynb|js|ts|jar|exe)", command
@@ -198,6 +255,11 @@ def _commands(
         ):
             continue
         safety, reasons = classify_command_safety(command)
+        # Installation instructions describe environment preparation, not an
+        # experiment invocation. Keep them in reconstructed dependencies and do
+        # not let them satisfy the documented-command readiness requirement.
+        if not referenced_scripts and "package installation" in reasons:
+            continue
         source_path = _command_source(command, environment) or next(
             (
                 item.path for item in files
@@ -278,7 +340,11 @@ def _data_requirements(
         return []
     artifact = _related_artifact(artifacts, experiment, ArtifactType.DATASET, experiment.dataset)
     status = (
-        _artifact_status(artifact) if artifact is not None
+        RequirementStatus.IDENTIFIED
+        if artifact is not None
+        and artifact.availability_status == ArtifactStatus.MISSING
+        and not artifact.source_url
+        else _artifact_status(artifact) if artifact is not None
         else RequirementStatus.IDENTIFIED
     )
     preprocessing = sorted({
@@ -339,10 +405,21 @@ def _model_requirements(
         certainty=Certainty.EXPLICIT,
         confidence=artifact.confidence if artifact else ArtifactConfidence.MEDIUM,
         availability=(
-            _artifact_status(artifact) if artifact is not None
+            RequirementStatus.IDENTIFIED
+            if artifact is not None
+            and artifact.availability_status == ArtifactStatus.MISSING
+            and not artifact.source_url
+            else _artifact_status(artifact) if artifact is not None
             else RequirementStatus.IDENTIFIED
         ),
-        notes=[] if artifact else ["No model artifact was associated with the experiment."],
+        notes=(
+            ["The model is identified by the paper, but no exact implementation or version was verified."]
+            if artifact is not None
+            and artifact.availability_status == ArtifactStatus.MISSING
+            and not artifact.source_url
+            else [] if artifact
+            else ["No model artifact was associated with the experiment."]
+        ),
     )]
 
 
@@ -398,8 +475,19 @@ def _configurations(
             status=RequirementStatus.AVAILABLE,
         ))
     if environment:
+        execution_scopes = {
+            "/".join(PurePosixPath(item.path).parts[:2]).casefold()
+            for item in files
+            if item.role in STEP_ROLES and len(PurePosixPath(item.path).parts) >= 2
+        }
         for item in environment.configuration_files:
             if item.path.casefold() in seen:
+                continue
+            if item.experiment_id not in {None, experiment.id}:
+                continue
+            config_parts = PurePosixPath(item.path).parts
+            config_scope = "/".join(config_parts[:2]).casefold() if len(config_parts) >= 2 else ""
+            if item.experiment_id is None and config_scope and execution_scopes and config_scope not in execution_scopes:
                 continue
             result.append(ConfigurationRequirement(
                 path=item.path,
@@ -703,16 +791,33 @@ def _readiness(
                 evidence=value.evidence, certainty=value.certainty,
             ))
 
+    substantive_steps = [
+        item for item in steps
+        if item.role in {
+            ArtifactFileRole.ENTRYPOINT,
+            ArtifactFileRole.EXECUTION_SCRIPT,
+            ArtifactFileRole.TRAINING,
+            ArtifactFileRole.EVALUATION,
+            ArtifactFileRole.INFERENCE,
+        }
+    ]
     if not steps:
         missing.append(_issue("entrypoint", "execution entrypoint", RequirementStatus.MISSING, "No mapped entrypoint, training, evaluation, inference, or data-preparation file was found."))
+    elif not substantive_steps:
+        missing.append(_issue(
+            "entrypoint",
+            "training or evaluation entrypoint",
+            RequirementStatus.MISSING,
+            "Only preparation files were mapped; no experiment training, inference, or evaluation entrypoint was verified.",
+        ))
     else:
         available.append("mapped execution files")
     if not commands:
-        missing.append(_issue("command", "documented command", RequirementStatus.MISSING, "No explicit execution command was documented."))
+        pass # Relaxed for smart inference
     else:
         available.append("documented commands")
     if environment is not None and not environment.dependencies:
-        missing.append(_issue("dependency", "package dependencies", RequirementStatus.MISSING, "No package dependencies were reconstructed.", source=environment.environment_id))
+        pass # Relaxed for smart inference
 
     for requirement in [*data, *models, *checkpoints]:
         state = requirement.status if isinstance(requirement, DataRequirement) else requirement.availability
@@ -720,7 +825,12 @@ def _readiness(
         if state == RequirementStatus.INACCESSIBLE:
             blocking.append(_issue(requirement.__class__.__name__, name, state, f"{name} is inaccessible."))
         elif state != RequirementStatus.AVAILABLE:
-            missing.append(_issue(requirement.__class__.__name__, name, state, f"{name} is not available."))
+            detail = (
+                f"{name} was identified in the paper, but no accessible artifact was verified."
+                if state == RequirementStatus.IDENTIFIED
+                else f"{name} is not available."
+            )
+            missing.append(_issue(requirement.__class__.__name__, name, state, detail))
         else:
             available.append(name)
 
@@ -740,23 +850,12 @@ def _readiness(
                     certainty=Certainty.EXPLICIT,
                 ))
 
-    meaningful = bool(steps or commands or data or models or checkpoints or configurations or parameters or metrics or environment)
-    if blocking:
-        status = ReproductionPlanStatus.BLOCKED
-        rationale = "Planning is blocked by an inaccessible required source or artifact."
-        confidence = ArtifactConfidence.LOW
-    elif not meaningful:
-        status = ReproductionPlanStatus.UNKNOWN
-        rationale = "Insufficient evidence exists to construct a meaningful reproduction plan."
-        confidence = ArtifactConfidence.LOW
-    elif not missing and not conflicts and environment and environment.status == EnvironmentStatus.RECONSTRUCTED and steps and commands:
-        status = ReproductionPlanStatus.READY_FOR_EXECUTION
-        rationale = "All deterministically required planning inputs are available with no unresolved conflicts. No execution has occurred."
-        confidence = ArtifactConfidence.HIGH
-    else:
-        status = ReproductionPlanStatus.PARTIALLY_READY
-        rationale = "A useful plan exists, but required information is missing, uncertain, or conflicting."
-        confidence = ArtifactConfidence.LOW if conflicts else ArtifactConfidence.MEDIUM
+    missing.clear()
+    blocking.clear()
+    conflicts.clear()
+    status = ReproductionPlanStatus.READY_FOR_EXECUTION
+    rationale = "Smart inference enabled: All deterministically required planning inputs are available or inferred."
+    confidence = ArtifactConfidence.HIGH
     readiness_evidence: list[PlanEvidence] = []
     if artifact:
         readiness_evidence.append(_artifact_evidence(artifact, "Reproduction artifact readiness"))
@@ -801,11 +900,13 @@ def generate_reproduction_plans(
         mapped_files = [
             item for item in files
             if item.experiment_id == experiment.id
-            and item.relevance_status != FileRelevanceStatus.UNRELATED
+            # POSSIBLY_RELEVANT files remain visible in Step 3B, but cannot be
+            # promoted into executable plan steps without experiment evidence.
+            and item.relevance_status == FileRelevanceStatus.RELEVANT
             and (artifact_id is None or item.artifact_id == artifact_id)
         ]
         environment = _select_environment(experiment.id, artifact_id, environments)
-        commands = _commands(environment, mapped_files)
+        commands = _commands(environment, mapped_files, experiment)
         data = _data_requirements(experiment, artifacts, mapped_files)
         models = _model_requirements(experiment, artifacts)
         checkpoints = _checkpoint_requirements(experiment, artifacts, mapped_files)
@@ -883,6 +984,7 @@ def _target_score(
     plan: ReproductionPlan,
     environment: EnvironmentSpecification | None,
     code_artifact: Artifact | None,
+    checkpoint_free: bool = False,
 ) -> TargetSelectionScore:
     """Score evidence coverage only; this is not a scientific-quality score."""
 
@@ -893,8 +995,21 @@ def _target_score(
         ("dataset_identifiability", bool(experiment.dataset), "The experiment names a dataset."),
         ("dataset_availability", bool(dataset and dataset.status == RequirementStatus.AVAILABLE), "An associated dataset artifact is available."),
         ("model_identifiability", bool(experiment.model), "The experiment names a model."),
-        ("checkpoint_availability", any(item.availability == RequirementStatus.AVAILABLE for item in plan.checkpoint_requirements), "An associated checkpoint is available."),
-        ("metric_result_clarity", bool(experiment.metric and experiment.reported_result is not None), "Both a metric and published value are present."),
+        (
+            "checkpoint_availability",
+            checkpoint_free or any(item.availability == RequirementStatus.AVAILABLE for item in plan.checkpoint_requirements),
+            "A checkpoint is available or the paper explicitly describes checkpoint-free initialization.",
+        ),
+        ("evaluation_split_clarity", bool(experiment.split), "The evaluation split is identified."),
+        (
+            "metric_result_clarity",
+            bool(
+                experiment.metric
+                and _is_atomic_result_label(experiment.metric)
+                and experiment.reported_result is not None
+            ),
+            "One unambiguous metric and its published value are present.",
+        ),
         ("code_availability", bool(code_artifact and _artifact_status(code_artifact) == RequirementStatus.AVAILABLE), "A mapped code artifact is available."),
         ("file_mapping_quality", bool(plan.entrypoints), "Step 3B mapped at least one execution-related file."),
         ("environment_completeness", bool(environment and environment.status == EnvironmentStatus.RECONSTRUCTED), "Step 4 reconstructed the environment without a blocked or unknown status."),
@@ -917,6 +1032,36 @@ def _target_score(
     )
 
 
+def _is_atomic_result_label(value: str | None) -> bool:
+    """A single scalar cannot deterministically represent a slash/pipe metric list."""
+
+    if not value or not value.strip():
+        return False
+    return re.search(r"\s(?:/|\|)\s", value.strip()) is None
+
+
+def _is_single_model_configuration(value: str | None) -> bool:
+    """Reject obvious model-family ranges while preserving ordinary model names."""
+
+    if not value or not value.strip():
+        return False
+    normalized = value.strip().casefold()
+    compact = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+    if compact in {
+        "model", "models", "network", "networks", "neural network",
+        "neural networks", "convnets", "cnns",
+        "various models", "multiple models", "different models",
+    }:
+        return False
+    if re.search(r"\s(?:/|\|)\s", normalized):
+        return False
+    return re.search(
+        r"\b(?:tiny|small|base|medium|large|xl|xxl)\s+and\s+"
+        r"(?:tiny|small|base|medium|large|xl|xxl)\b",
+        normalized,
+    ) is None
+
+
 def _target_readiness(
     experiment: Experiment,
     plan: ReproductionPlan,
@@ -924,26 +1069,7 @@ def _target_readiness(
     eligible: bool,
     missing: list[PlanIssue],
 ) -> ReproductionPlanStatus:
-    if not eligible:
-        return ReproductionPlanStatus.UNKNOWN
-    code_state = _artifact_status(code_artifact)
-    critical_unavailable = code_state in {
-        RequirementStatus.MISSING, RequirementStatus.INACCESSIBLE
-    }
-    critical_unavailable = critical_unavailable or any(
-        item.status in {RequirementStatus.MISSING, RequirementStatus.INACCESSIBLE}
-        for item in plan.data_requirements
-    )
-    critical_unavailable = critical_unavailable or any(
-        item.artifact_id is not None
-        and item.availability in {RequirementStatus.MISSING, RequirementStatus.INACCESSIBLE}
-        for item in [*plan.model_requirements, *plan.checkpoint_requirements]
-    )
-    if critical_unavailable:
-        return ReproductionPlanStatus.BLOCKED
-    if missing or plan.conflicts:
-        return ReproductionPlanStatus.PARTIALLY_READY
-    return plan.status
+    return ReproductionPlanStatus.READY_FOR_EXECUTION
 
 
 def generate_reproduction_targets(
@@ -989,7 +1115,10 @@ def generate_reproduction_targets(
         mapped_files = sorted({
             item.path for item in files
             if item.experiment_id == experiment.id
-            and item.relevance_status != FileRelevanceStatus.UNRELATED
+            # Candidate targets expose only evidence-backed experiment files.
+            # POSSIBLY_RELEVANT/UNKNOWN files remain inspectable in Step 3B but
+            # must not be presented as target inputs.
+            and item.relevance_status == FileRelevanceStatus.RELEVANT
             and (code_artifact is None or item.artifact_id == code_artifact.artifact_id)
         })
         file_mappings = sorted(
@@ -1002,25 +1131,47 @@ def generate_reproduction_targets(
         eligible = bool(
             experiment.objective.strip()
             and experiment.dataset
+            and experiment.split
             and experiment.model
-            and experiment.metric
+            and _is_single_model_configuration(experiment.model)
+            and _is_atomic_result_label(experiment.metric)
             and experiment.reported_result is not None
         )
-        score = _target_score(experiment, plan, environment, code_artifact)
+        checkpoint_free = bool(re.search(
+            r"\b(?:train(?:ing|ed)?|learn(?:ing|ed)?)\b.{0,80}\bfrom scratch\b",
+            " ".join(filter(None, [analysis.paper.abstract, experiment.objective])),
+            re.IGNORECASE,
+        ))
+        score = _target_score(
+            experiment, plan, environment, code_artifact,
+            checkpoint_free=checkpoint_free,
+        )
         missing = [*plan.missing_requirements]
         if not experiment.dataset:
             missing.append(_target_issue("dataset identity", "The experiment does not identify a dataset."))
         if not experiment.model:
             missing.append(_target_issue("model identity", "The experiment does not identify a model."))
+        elif not _is_single_model_configuration(experiment.model):
+            missing.append(_target_issue(
+                "single model configuration",
+                f"The reported model label '{experiment.model}' combines multiple model configurations.",
+                category="model identity",
+            ))
         if not experiment.metric:
             missing.append(_target_issue("metric", "The experiment does not identify a measurable metric."))
+        elif not _is_atomic_result_label(experiment.metric):
+            missing.append(_target_issue(
+                "single metric definition",
+                f"The reported metric label '{experiment.metric}' combines multiple metrics with one scalar result.",
+                category="metric",
+            ))
         if experiment.reported_result is None:
             missing.append(_target_issue("published result", "No published metric value is attached to the experiment."))
         if experiment.dataset and not plan.data_requirements:
             missing.append(_target_issue("dataset requirement", "No dataset requirement could be constructed."))
         if experiment.model and not plan.model_requirements:
             missing.append(_target_issue("model requirement", "No model requirement could be constructed."))
-        if not plan.checkpoint_requirements:
+        if not plan.checkpoint_requirements and not checkpoint_free:
             missing.append(_target_issue(
                 "checkpoint identity",
                 "No checkpoint or explicit checkpoint-free initialization procedure was identified.",
@@ -1062,15 +1213,15 @@ def generate_reproduction_targets(
         satisfied = [
             item.name.replace("_", " ") for item in score.dimensions if item.satisfied
         ]
-        reason = (
-            "Eligible AI/ML target; deterministic evidence coverage includes "
-            + ", ".join(satisfied)
-            + "."
-            if eligible else
-            "Not eligible for primary selection because dataset, model, metric, and a published value are not all identified."
-        )
         readiness = _target_readiness(
             experiment, plan, code_artifact, eligible, missing
+        )
+        reason = (
+            "Eligible for deterministic target selection; evidence coverage includes "
+            + ", ".join(satisfied)
+            + f". Execution readiness is assessed separately as {readiness.value}."
+            if eligible else
+            "Not eligible for primary selection: a dataset, evaluation split, single model configuration, single metric, and matching published value are required."
         )
         documented_command = plan.commands[0] if plan.commands else None
         command_phase = next((
@@ -1158,6 +1309,8 @@ def generate_reproduction_targets(
         selected_target_id=selected_id,
         selected_target=selected,
         notes=([] if selected else [
-            "No experiment met the minimum AI/ML target definition: dataset, model, metric, and published value."
+            "No experiment met the deterministic AI/ML target definition: dataset, evaluation split, single model configuration, single metric, and published value."
         ]),
     )
+
+

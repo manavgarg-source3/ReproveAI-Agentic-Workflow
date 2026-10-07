@@ -3,6 +3,7 @@
 import os
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +97,49 @@ def _parse_numbered_reference_fields(raw_reference: str) -> tuple[str | None, li
     return title or None, authors
 
 
+def _parse_unnumbered_reference_fields(raw_reference: str) -> tuple[str | None, list[str]]:
+    """Recover the author list and title from line-wrapped author-date citations."""
+
+    value = unicodedata.normalize("NFKC", re.sub(r"\s+", " ", raw_reference)).strip()
+    protected = re.sub(
+        r"\b([A-Z])\.\s+(?=[A-Z])",
+        lambda match: f"{match.group(1)}\u0000 ",
+        value,
+    )
+    parts = [part.replace("\u0000", ".").strip(" .") for part in re.split(r"\.\s+", protected)]
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        return None, []
+    author_text, title = parts[0], parts[1]
+    title = re.split(r"(?<=[?!])\s+", title, maxsplit=1)[0]
+    title = re.sub(r",\s*(?:18|19|20)\d{2}[a-z]?$", "", title, flags=re.IGNORECASE)
+    title = re.sub(r"(?<=\w)-\s+(?=\w)", "", title)
+    if not ("," in author_text or " and " in author_text):
+        return None, []
+    authors = [
+        author.strip(" ,")
+        for author in re.split(r"\s*,\s*(?:and\s+)?|\s+and\s+", author_text)
+        if author.strip(" ,")
+    ]
+    return title or None, authors
+
+
+def _publication_year(raw_reference: str) -> int | None:
+    """Return a visible publication year without mistaking arXiv IDs for years."""
+
+    sanitized = re.sub(
+        r"(?i)(?:arxiv\s*:\s*|arxiv\.org/(?:abs|pdf)/\s*)\d{4}\.\s*\d+",
+        " ",
+        raw_reference,
+    )
+    sanitized = re.sub(r"(?i)10\.\d{4,9}/\s*\S+", " ", sanitized)
+    candidates = re.findall(
+        r"(?<!\d)((?:18|19|20)\d{2})(?:[a-z])?(?!\d|\.\d)",
+        sanitized,
+        flags=re.IGNORECASE,
+    )
+    return int(candidates[-1]) if candidates else None
+
+
 class ScientometricAdapter:
     """Keep all engine-specific imports and translations behind one boundary."""
 
@@ -169,13 +213,28 @@ class ScientometricAdapter:
         status_value = getattr(result.final_status, "value", str(result.final_status))
         confidence_value = getattr(result.confidence, "value", str(result.confidence))
         rationale = str(getattr(result, "decision_rationale", "")).strip()
+        source = getattr(result, "metadata_source", "") or None
+        normalized_doi = self._normalize_doi(getattr(result, "normalized_doi", "")) or None
+        notes = [rationale] if rationale else []
+        source_label = {
+            "crossref": "Crossref",
+            "openalex": "OpenAlex",
+            "scopus": "Elsevier Scopus",
+            "scopus_index": "Elsevier Scopus",
+        }.get((source or "").lower(), source or "an external scholarly registry")
+        if not reference.doi and status_value == "DOI_RECOVERED":
+            notes.insert(0, f"The DOI was missing from the paper; {source_label} identified {normalized_doi} from matching bibliographic metadata.")
+        elif not reference.doi and status_value == "DOI_RECOVERY_UNCERTAIN":
+            notes.insert(0, f"The DOI was missing from the paper; {source_label} returned a plausible DOI candidate that requires human review.")
+        elif not reference.doi and status_value in {"WORK_FOUND_NO_DOI", "SCOPUS_LINKED_NO_DOI"}:
+            notes.insert(0, f"The paper supplied no DOI; {source_label} confirms a matching scholarly record, but no registered DOI was found.")
+        elif not reference.doi and status_value in {"DOI_MISSING", "SCOPUS_UNLINKED"}:
+            notes.insert(0, "The paper supplied no DOI, and Crossref, OpenAlex, and Elsevier Scopus produced no confident bibliographic match.")
 
         return ReferenceValidation(
             reference_id=reference.id,
             input_doi=reference.doi,
-            normalized_doi=(
-                self._normalize_doi(getattr(result, "normalized_doi", "")) or None
-            ),
+            normalized_doi=normalized_doi,
             doi_resolves=getattr(result, "doi_resolves", None),
             status=ReferenceValidationStatus(status_value),
             matched_title=getattr(result, "resolved_title", "") or None,
@@ -183,10 +242,10 @@ class ScientometricAdapter:
             matched_year=getattr(result, "resolved_year", None),
             matched_venue=getattr(result, "resolved_journal", "") or None,
             metadata_match_score=getattr(result, "composite_score", None),
-            source=getattr(result, "metadata_source", "") or None,
+            source=source,
             confidence=confidence_value or None,
             needs_human_review=bool(getattr(result, "needs_human_review", False)),
-            notes=[rationale] if rationale else [],
+            notes=notes,
         )
 
 
@@ -239,13 +298,27 @@ def extract_references_from_document(text: str) -> list[Reference]:
     for index, raw_reference in enumerate(raw_references, start=1):
         parsed = CitationParser.parse(raw_reference)
         numbered_title, numbered_authors = _parse_numbered_reference_fields(raw_reference)
-        authors = numbered_authors or _authors_list(parsed.get("cited_authors", ""))
+        inferred_title, inferred_authors = (
+            (numbered_title, numbered_authors)
+            if numbered_title
+            else _parse_unnumbered_reference_fields(raw_reference)
+        )
+        authors = inferred_authors or _authors_list(parsed.get("cited_authors", ""))
+        doi_text = re.sub(r"(10\.\d{4,9}/)\s+", r"\1", raw_reference)
+        doi_text = re.sub(
+            r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)\.\s+([A-Za-z0-9])",
+            r"\1.\2",
+            doi_text,
+        )
+        extracted_doi = extract_doi(doi_text)
+        if extracted_doi:
+            extracted_doi = re.sub(r"\.(?:URL|arXiv)$", "", extracted_doi, flags=re.IGNORECASE)
         references.append(Reference(
             id=f"ref_{index}",
             citation_text=raw_reference,
-            title=numbered_title or parsed.get("cited_title") or None,
+            title=inferred_title or parsed.get("cited_title") or None,
             authors=authors,
-            year=parsed.get("cited_year"),
-            doi=extract_doi(raw_reference),
+            year=_publication_year(raw_reference) or parsed.get("cited_year"),
+            doi=extracted_doi,
         ))
     return references

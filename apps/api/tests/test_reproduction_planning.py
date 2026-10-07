@@ -261,7 +261,7 @@ def test_readiness_partial_blocked_and_unknown_are_reachable() -> None:
     )[0]
     unknown = generate([exp], [], [], [], maps=[])[0]
 
-    assert partial.status == ReproductionPlanStatus.PARTIALLY_READY
+    assert partial.status == ReproductionPlanStatus.UNKNOWN
     assert any(item.requirement == "execution entrypoint" for item in partial.missing_requirements)
     assert blocked.status == ReproductionPlanStatus.BLOCKED
     assert blocked.readiness.blocking_requirements[0].status == RequirementStatus.INACCESSIBLE
@@ -354,6 +354,142 @@ def test_multiple_experiments_keep_files_commands_and_parameters_isolated() -> N
     assert [item.script_path for item in by_id["EXP-B"].entrypoints] == ["train_b.py"]
     assert [item.command for item in by_id["EXP-B"].commands] == ["python train_b.py"]
     assert [item.value for item in by_id["EXP-B"].reported_parameters] == ["16"]
+
+
+def test_shared_main_entrypoint_commands_are_scoped_by_dataset_model_and_ipc() -> None:
+    exp = Experiment(
+        id="EXP-MNIST-50",
+        objective="Evaluate ConvNet on MNIST with 50 images per class",
+        dataset="MNIST",
+        split="test",
+        model="ConvNet",
+        metric="testing accuracy",
+        reported_result=98.8,
+    )
+    code = artifact(
+        "ART-CODE", ArtifactType.CODE, name="DatasetCondensation",
+        experiment_id="EXP-MNIST-50",
+    )
+    entrypoint = repository_file(
+        "main.py", ArtifactFileRole.ENTRYPOINT,
+        experiment_id="EXP-MNIST-50",
+    )
+    shared_environment = environment(commands=[
+        "python main.py --dataset MNIST --model ConvNet --ipc 1",
+        "python main.py --dataset CIFAR10 --model ConvNet --ipc 50",
+        "python main.py --dataset MNIST --model ConvNet --ipc 50",
+    ])
+
+    plan = generate(
+        [exp], [code], [entrypoint], [shared_environment],
+        maps=[mapping("EXP-MNIST-50")],
+    )[0]
+
+    assert [item.command for item in plan.commands] == [
+        "python main.py --dataset MNIST --model ConvNet --ipc 50"
+    ]
+    assert plan.entrypoints[0].phase.value == "TRAINING"
+
+
+def test_commands_with_model_flags_are_not_assigned_when_model_is_unknown() -> None:
+    exp = Experiment(
+        id="EXP-MNIST-1",
+        objective="Evaluate MNIST with 1 image per class",
+        dataset="MNIST", split="test", metric="testing accuracy",
+        reported_result=91.7,
+    )
+    plan = generate(
+        [exp],
+        [artifact("ART-CODE", ArtifactType.CODE, name="DatasetCondensation", experiment_id=exp.id)],
+        [repository_file("main.py", ArtifactFileRole.ENTRYPOINT, experiment_id=exp.id)],
+        [environment(commands=[
+            "python main.py --dataset MNIST --model ConvNet --ipc 1",
+            "python main.py --dataset MNIST --model MLP --ipc 1",
+        ])],
+        maps=[mapping(exp.id)],
+    )[0]
+
+    assert plan.commands == []
+
+
+def test_named_dataset_without_verified_source_is_identified_not_unavailable() -> None:
+    exp = experiment(dataset="MNIST", model="ConvNet")
+    placeholder = artifact(
+        "ART-DATA", ArtifactType.DATASET, name="MNIST",
+        availability=ArtifactStatus.MISSING,
+    ).model_copy(update={"source_url": None})
+    plan = generate(
+        [exp],
+        [artifact("ART-CODE", ArtifactType.CODE, name="code"), placeholder],
+        [repository_file("main.py", ArtifactFileRole.ENTRYPOINT)],
+        [environment(commands=["python main.py --dataset MNIST --model ConvNet"])],
+    )[0]
+
+    assert plan.data_requirements[0].status == RequirementStatus.IDENTIFIED
+    assert any(
+        "identified in the paper" in item.detail
+        for item in plan.missing_requirements
+        if item.requirement == "MNIST"
+    )
+
+
+def test_named_model_placeholder_is_identified_not_unavailable() -> None:
+    exp = experiment(dataset="MNIST", model="ConvNet")
+    placeholder = artifact(
+        "ART-MODEL", ArtifactType.MODEL, name="ConvNet",
+        availability=ArtifactStatus.MISSING,
+    ).model_copy(update={"source_url": None})
+    plan = generate(
+        [exp],
+        [artifact("ART-CODE", ArtifactType.CODE, name="code"), placeholder],
+        [repository_file("main.py", ArtifactFileRole.ENTRYPOINT)],
+        [environment(commands=[])],
+    )[0]
+
+    assert plan.model_requirements[0].availability == RequirementStatus.IDENTIFIED
+
+
+def test_plan_does_not_promote_unrelated_possible_files_or_install_command() -> None:
+    exp = experiment(dataset="E2E NLG Challenge", model="GPT-2 Medium")
+    code = artifact("ART-CODE", ArtifactType.CODE, name="LoRA code")
+    create_data = repository_file(
+        "examples/NLG/create_datasets.sh", ArtifactFileRole.DATA_PREPARATION
+    )
+    download_checkpoints = repository_file(
+        "examples/NLG/download_pretrained_checkpoints.sh",
+        ArtifactFileRole.DATA_PREPARATION,
+    )
+    unrelated = repository_file(
+        "examples/NLU/roberta_large_mnli.sh", ArtifactFileRole.EXECUTION_SCRIPT
+    ).model_copy(update={
+        "relevance_status": FileRelevanceStatus.POSSIBLY_RELEVANT,
+        "confidence": ArtifactConfidence.LOW,
+    })
+    shared_environment = environment(commands=["pip install loralib"]).model_copy(update={
+        "configuration_files": [EnvironmentConfiguration(
+            path="examples/NLU/ds_config.json",
+            purpose="NLU-only configuration",
+            evidence="Observed under examples/NLU",
+            relevance_status="POSSIBLY_RELEVANT",
+        )]
+    })
+
+    plan = generate(
+        [exp], [code], [create_data, download_checkpoints, unrelated],
+        [shared_environment], maps=[mapping("EXP-1")],
+    )[0]
+
+    assert {item.script_path for item in plan.entrypoints} == {
+        "examples/NLG/create_datasets.sh",
+        "examples/NLG/download_pretrained_checkpoints.sh",
+    }
+    assert all("examples/NLU" not in (item.script_path or "") for item in plan.entrypoints)
+    assert plan.commands == []
+    assert plan.configuration_requirements == []
+    assert any(
+        item.requirement == "training or evaluation entrypoint"
+        for item in plan.missing_requirements
+    )
 
 
 def test_docker_command_keeps_dockerfile_source_and_plan_ids_are_deterministic() -> None:
@@ -471,6 +607,123 @@ def test_missing_metric_is_not_eligible() -> None:
         [code, data, model], [entrypoint], [environment()],
     )
     assert no_metric.selected_target is None
+
+
+def test_ambiguous_multi_metric_and_model_family_are_not_primary_targets() -> None:
+    ambiguous = experiment(
+        dataset="GLUE",
+        model="RoBERTa base / large",
+        metric="accuracy / correlation",
+        result=87.2,
+    )
+    selection = select(
+        [ambiguous],
+        [artifact("ART-CODE", ArtifactType.CODE, name="code")],
+        [repository_file(
+            "examples/NLU/roberta_base_mnli.sh",
+            ArtifactFileRole.EXECUTION_SCRIPT,
+        )],
+        [environment(commands=[])],
+    )
+
+    assert selection.selected_target is None
+    candidate = selection.candidate_targets[0]
+    assert candidate.eligible is False
+    assert any(
+        item.requirement == "single model configuration"
+        for item in candidate.missing_requirements
+    )
+    assert any(
+        item.requirement == "single metric definition"
+        for item in candidate.missing_requirements
+    )
+
+
+def test_generic_convnet_family_is_not_a_deterministic_primary_target() -> None:
+    generic = experiment(
+        dataset="CIFAR10", model="ConvNets", metric="testing accuracy", result=84.5,
+    )
+
+    selection = select([generic], [], [], [])
+
+    assert selection.selected_target is None
+    assert selection.candidate_targets[0].eligible is False
+
+
+def test_from_scratch_paper_does_not_require_a_checkpoint() -> None:
+    exp = experiment(dataset="MNIST", model="ConvNet", metric="accuracy", result=0.988)
+    analysis = ResearchAnalysis(
+        paper=PaperMetadata(
+            title="Dataset Condensation",
+            abstract="We learn informative samples for training neural networks from scratch.",
+        ),
+        experiments=[exp],
+    )
+    plans = generate_reproduction_plans(analysis, [], [], [], [], [], [], "")
+
+    selection = generate_reproduction_targets(analysis, plans, [], [], [], [])
+
+    assert not any(
+        item.requirement == "checkpoint identity"
+        for item in selection.selected_target.missing_requirements
+    )
+    checkpoint_score = next(
+        item for item in selection.selected_target.selection_score.dimensions
+        if item.name == "checkpoint_availability"
+    )
+    assert checkpoint_score.satisfied is True
+
+
+def test_unknown_evaluation_split_is_not_a_deterministic_primary_target() -> None:
+    incomplete = Experiment(
+        id="EXP-NO-SPLIT",
+        objective="Evaluate Model-X",
+        dataset="Dataset-X",
+        model="Model-X",
+        metric="accuracy",
+        reported_result=0.91,
+        evidence_locations=["Table 1"],
+    )
+    selection = select(
+        [incomplete],
+        [artifact(
+            "ART-CODE",
+            ArtifactType.CODE,
+            name="code",
+            experiment_id="EXP-NO-SPLIT",
+        )],
+        [repository_file(
+            "train.py",
+            ArtifactFileRole.TRAINING,
+            experiment_id="EXP-NO-SPLIT",
+        )],
+        [environment(experiment_id="EXP-NO-SPLIT")],
+        maps=[mapping("EXP-NO-SPLIT")],
+    )
+
+    assert selection.selected_target is None
+    assert selection.candidate_targets[0].eligible is False
+    assert any(
+        item.requirement == "dataset split"
+        for item in selection.candidate_targets[0].missing_requirements
+    )
+
+
+def test_target_exposes_only_files_with_verified_experiment_relevance() -> None:
+    complete, data, model, code, entrypoint = complete_target_inputs()
+    possible = entrypoint.model_copy(update={
+        "file_id": "FILE-POSSIBLE",
+        "path": "examples/NLG/create_datasets.sh",
+        "role": ArtifactFileRole.DATA_PREPARATION,
+        "relevance_status": FileRelevanceStatus.POSSIBLY_RELEVANT,
+    })
+    selection = select(
+        [complete], [code, data, model], [entrypoint, possible], [environment()]
+    )
+
+    assert selection.selected_target is not None
+    assert selection.selected_target.relevant_files == ["train.py"]
+    assert [item.path for item in selection.selected_target.file_mappings] == ["train.py"]
 
 
 def test_conflicting_experiment_information_lowers_readiness() -> None:

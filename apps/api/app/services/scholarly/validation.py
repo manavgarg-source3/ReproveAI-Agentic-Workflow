@@ -1,6 +1,7 @@
 """Paper-level reference validation with per-reference failure isolation."""
 
 import logging
+import os
 from collections.abc import Iterable
 
 import requests
@@ -38,15 +39,20 @@ def validate_references(
 
     reference_list = list(references)
     
-    # PERFORMANCE SAFEGUARD: Survey papers can have 300+ references.
-    # We cap validation to 25 to avoid 15-minute HTTP timeouts.
+    # Keep a configurable safety bound for exceptionally large surveys while
+    # validating ordinary bibliographies in full.
+    validation_limit = max(1, int(os.getenv("SCHOLARLY_VALIDATION_LIMIT", "100")))
     original_count = len(reference_list)
-    if original_count > 25:
-        logger.warning(f"Capping validation to 25 references (out of {original_count}) to prevent timeout.")
+    if original_count > validation_limit:
+        logger.warning(
+            "Capping validation to %d references (out of %d) to prevent timeout.",
+            validation_limit,
+            original_count,
+        )
         
         # We still need to return validation stubs for the skipped ones so the frontend doesn't break
-        skipped = reference_list[25:]
-        reference_list = reference_list[:25]
+        skipped = reference_list[validation_limit:]
+        reference_list = reference_list[:validation_limit]
     else:
         skipped = []
     if not reference_list:

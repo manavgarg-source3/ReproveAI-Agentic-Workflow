@@ -66,6 +66,7 @@ class ReferenceValidationStatus(str, Enum):
     DOI_MISSING = "DOI_MISSING"
     DOI_RECOVERED = "DOI_RECOVERED"
     DOI_RECOVERY_UNCERTAIN = "DOI_RECOVERY_UNCERTAIN"
+    WORK_FOUND_NO_DOI = "WORK_FOUND_NO_DOI"
     SCOPUS_LINKED_NO_DOI = "SCOPUS_LINKED_NO_DOI"
     SCOPUS_UNLINKED = "SCOPUS_UNLINKED"
     METADATA_MISMATCH = "METADATA_MISMATCH"
@@ -769,8 +770,9 @@ class ReproductionTargetSelection(StrictModel):
     selected_target_id: str | None = None
     selected_target: ReproductionTarget | None = None
     selection_method: str = (
-        "Eligible candidates are ranked by deterministic evidence coverage score, "
-        "then readiness status, then stable target ID."
+        "Candidates require a dataset, evaluation split, single model configuration, "
+        "single metric, and published value; eligible candidates are ranked by "
+        "deterministic evidence coverage score, then readiness status, then stable target ID."
     )
     notes: list[str] = Field(default_factory=list)
 

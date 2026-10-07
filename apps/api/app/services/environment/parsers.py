@@ -104,10 +104,12 @@ def parse_requirements_txt(content: str, source_path: str) -> list[EnvironmentDe
 def _parse_conda_dependency(value: str, source_path: str) -> EnvironmentDependency | None:
     if any(operator in value for operator in ("==", ">", "<", "~", "!")):
         return parse_requirement_line(value, source_path)
-    match = re.fullmatch(rf"(?P<name>{_NAME})(?:=(?P<version>[^=\s]+))?", value)
+    match = re.fullmatch(rf"(?P<name>{_NAME})(?:=(?P<version>[^\s]+))?", value)
     if not match:
         return None
     version = match.group("version")
+    if version:
+        version = version.split("=")[0]
     return _dependency(match.group("name"), f"=={version}" if version else None, source_path, value)
 
 
@@ -495,10 +497,11 @@ def parse_documentation(content: str, source_path: str) -> DocumentationData:
             category="system_dependency", value=package, source_path=source_path,
             evidence=line[:300], certainty=Certainty.EXPLICIT,
         ) for package in packages)
+        clean_line = line.strip("`'\" ")
         if (
-            line.startswith("$") or re.match(r"(?:python|conda|pip|poetry|make)\s+", line, re.IGNORECASE)
-        ) and "=" not in line and not re.search(r"KEY|TOKEN|SECRET|PASSWORD|PASS|PWD|AUTH", line, re.IGNORECASE):
-            commands.append(line.lstrip("$ "))
+            clean_line.startswith("$") or re.match(r"(?:python|conda|pip|poetry|make)\s+", clean_line, re.IGNORECASE)
+        ) and "=" not in clean_line and not re.search(r"KEY|TOKEN|SECRET|PASSWORD|PASS|PWD|AUTH", clean_line, re.IGNORECASE):
+            commands.append(clean_line.lstrip("$ "))
     return DocumentationData(
         evidence=evidence,
         environment_variables=extract_env_vars(content),

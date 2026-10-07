@@ -8,6 +8,8 @@ import urllib.parse
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from app.schemas.research import Reference, ReferenceValidation
 from app.services.evidence.provider import SourceEvidence
 from app.services.scholarly.scientometric_adapter import _discover_engine_root
@@ -62,6 +64,7 @@ class ScientometricSourceEvidenceProvider:
         *,
         crossref: Any | None = None,
         openalex: Any | None = None,
+        http_session: Any | None = None,
         max_characters: int | None = None,
     ) -> None:
         if crossref is None or openalex is None:
@@ -76,6 +79,7 @@ class ScientometricSourceEvidenceProvider:
             openalex = openalex or OpenAlexClient()
         self._crossref = crossref
         self._openalex = openalex
+        self._http = http_session or requests.Session()
         self.max_characters = max_characters or _configured_limit()
         self._cache: dict[str, SourceEvidence] = {}
 
@@ -149,6 +153,49 @@ class ScientometricSourceEvidenceProvider:
                 excerpt=openalex_excerpt,
                 evidence_type="ABSTRACT",
             )
+        elif doi.casefold().startswith("10.18653/v1/"):
+            anthology_id = doi.split("/", 2)[-1]
+            anthology_url = f"https://aclanthology.org/{anthology_id}/"
+            try:
+                response = self._http.get(
+                    anthology_url,
+                    timeout=10.0,
+                    headers={"User-Agent": "REPROVE/1.0 (scholarly evidence retrieval)"},
+                )
+                response.raise_for_status()
+                abstract_match = re.search(
+                    r'<div\s+class="card-body\s+acl-abstract"[^>]*>.*?<span>(.*?)</span>',
+                    response.text,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                anthology_excerpt = _clean_abstract(
+                    abstract_match.group(1) if abstract_match else None,
+                    self.max_characters,
+                )
+            except requests.RequestException:
+                anthology_excerpt = None
+            if anthology_excerpt:
+                result = SourceEvidence(
+                    reference_id=reference.id,
+                    source="ACL Anthology",
+                    title=(validation.matched_title if validation is not None else None)
+                    or crossref_title
+                    or reference.title,
+                    locator=anthology_url,
+                    excerpt=anthology_excerpt,
+                    evidence_type="ABSTRACT",
+                )
+            else:
+                result = SourceEvidence(
+                    reference_id=reference.id,
+                    source=(validation.source if validation is not None else None),
+                    title=(validation.matched_title if validation is not None else None)
+                    or crossref_title
+                    or reference.title,
+                    locator=crossref_locator or openalex_locator or f"https://doi.org/{doi}",
+                    excerpt=None,
+                    evidence_type="METADATA_ONLY",
+                )
         else:
             result = SourceEvidence(
                 reference_id=reference.id,

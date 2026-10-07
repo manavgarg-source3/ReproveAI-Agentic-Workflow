@@ -520,6 +520,49 @@ class ReferenceValidator:
                     needs_human_review=needs_review,
                 )
 
+        if candidate_meta and not candidate_meta.get("doi"):
+            return VerificationResult(
+                reference_id=ref.reference_id,
+                source_eid=ref.source_eid,
+                source_title=ref.source_title,
+                source_authors=ref.source_authors,
+                source_year=ref.source_year,
+                source_doi=ref.source_doi,
+                reference_no=ref.reference_no,
+                raw_reference=ref.raw_reference,
+                scopus_linked=candidate_meta.get("provider") == "scopus",
+                scopus_reference_link=ref.scopus_reference_link or "Not linked in Scopus",
+                scopus_id=str(candidate_meta.get("eid", "")),
+                extracted_doi=ref.extracted_doi,
+                normalized_doi="",
+                doi_exists=False,
+                doi_resolves=False,
+                metadata_source=candidate_meta.get("provider", ""),
+                resolved_title=candidate_meta.get("title", ""),
+                resolved_authors=candidate_meta.get("authors", ""),
+                resolved_journal=candidate_meta.get("journal", ""),
+                resolved_year=candidate_meta.get("year"),
+                resolved_volume=str(candidate_meta.get("volume", "")),
+                resolved_issue=str(candidate_meta.get("issue", "")),
+                resolved_pages=str(candidate_meta.get("pages", "")),
+                is_retracted=candidate_meta.get("is_retracted", False),
+                title_similarity=match_scores.get("title_similarity", 0.0),
+                author_similarity=match_scores.get("author_similarity", 0.0),
+                journal_similarity=match_scores.get("journal_similarity", 0.0),
+                year_match=match_scores.get("year_match", False),
+                volume_match=match_scores.get("volume_match", False),
+                pages_match=match_scores.get("pages_match", False),
+                composite_score=match_scores.get("composite_score", 0.0),
+                confidence=ConfidenceLevel.HIGH,
+                final_status=FinalStatus.WORK_FOUND_NO_DOI,
+                decision_rationale=(
+                    "The paper supplied no DOI; a high-confidence bibliographic record "
+                    f"was found in {candidate_meta.get('provider', 'an external registry')}, "
+                    "but that record has no registered DOI."
+                ),
+                needs_human_review=False,
+            )
+
         # No candidate found
         return VerificationResult(
             reference_id=ref.reference_id,
@@ -534,9 +577,9 @@ class ReferenceValidator:
             scopus_reference_link=ref.scopus_reference_link or "Not linked in Scopus",
             scopus_id=ref.scopus_id,
             extracted_doi=ref.extracted_doi,
-            confidence=ConfidenceLevel.HIGH,
+            confidence=ConfidenceLevel.UNCERTAIN,
             final_status=FinalStatus.DOI_MISSING,
             decision_rationale="Reference contains no explicit DOI and no candidate was discovered in external registries.",
-            needs_human_review=ref.needs_review,
+            needs_human_review=True,
         )
 

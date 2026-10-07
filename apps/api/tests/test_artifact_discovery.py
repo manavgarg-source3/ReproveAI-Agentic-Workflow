@@ -209,6 +209,27 @@ def test_artifact_is_associated_with_matching_experiment() -> None:
     assert repo.experiment_id == "EXP-003"
 
 
+def test_generic_method_context_does_not_associate_repository_with_gpt3_ablation() -> None:
+    experiment = Experiment(
+        id="EXP-GPT3",
+        objective="Apply LoRA to attention weights in GPT-3",
+        dataset="WikiSQL",
+        split="validation",
+        model="GPT-3 (Wk)",
+        metric="Validation accuracy",
+        reported_result=70.0,
+    )
+    url = "https://github.com/example/lora"
+    artifacts = discover_artifacts(
+        f"The official LoRA implementation is available at {url}.",
+        analysis(experiments=[experiment]),
+        repository_provider=StubRepositories({url: repository_record(url)}),
+    )
+
+    repo = next(item for item in artifacts if item.type == ArtifactType.CODE)
+    assert repo.experiment_id is None
+
+
 def test_ambiguous_repository_relationship_remains_explicit() -> None:
     url = "https://github.com/example/mirror"
     artifacts = discover_artifacts(

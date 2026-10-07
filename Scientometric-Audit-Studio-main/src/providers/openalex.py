@@ -3,6 +3,7 @@ OpenAlex REST API client with thread-safe rate limiting, caching, and polite poo
 """
 import time
 import logging
+import re
 import urllib.parse
 from typing import Optional, Dict, Any, List
 import requests
@@ -31,10 +32,14 @@ class OpenAlexClient:
             "Accept": "application/json",
         })
         self.cache = CacheManager.get_instance()
+        self._quota_unavailable_until = 0.0
 
     def is_available(self) -> bool:
         """Returns False if currently cooling down from a 429."""
-        return not self._limiter.is_in_backoff()
+        return (
+            time.time() >= self._quota_unavailable_until
+            and not self._limiter.is_in_backoff()
+        )
 
     def get_by_doi(self, doi: str) -> Optional[Dict[str, Any]]:
         """
@@ -67,12 +72,17 @@ class OpenAlexClient:
         if not clean_title or len(clean_title) < 5:
             return []
 
-        cache_key = f"{clean_title}__rows_{rows}"
+        cache_key = f"all_title_records_v5__{clean_title}__rows_{rows}"
         cached = self.cache.get("openalex_search", cache_key)
         if cached is not None:
             return cached.get("items", [])
 
-        encoded_title = urllib.parse.quote_plus(clean_title)
+        # OpenAlex filter syntax rejects punctuation such as commas and treats
+        # '?' and '*' specially. Search the title-only index after replacing
+        # punctuation with spaces; this remains precise and supports real
+        # publication titles containing those characters.
+        searchable_title = " ".join(re.sub(r"[^\w\s]", " ", clean_title).split())
+        encoded_title = urllib.parse.quote_plus(searchable_title)
         url = f"{self.BASE_URL}/works?filter=title.search:{encoded_title}&per_page={rows}"
         
         data = self._request_with_retry(url)
@@ -80,7 +90,7 @@ class OpenAlexClient:
         if data and "results" in data:
             for item in data["results"]:
                 meta = self._extract_metadata(item)
-                if meta.get("doi"):
+                if meta.get("title"):
                     candidates.append(meta)
 
         # Always cache search result to prevent re-querying
@@ -89,7 +99,11 @@ class OpenAlexClient:
 
     def _request_with_retry(self, url: str) -> Optional[Dict[str, Any]]:
         for attempt in range(1, MAX_RETRIES + 1):
+            if time.time() < self._quota_unavailable_until:
+                return None
             self._limiter.acquire()
+            if time.time() < self._quota_unavailable_until:
+                return None
             try:
                 resp = self.session.get(url, timeout=REQUEST_TIMEOUT)
                 if resp.status_code == 200:
@@ -98,6 +112,14 @@ class OpenAlexClient:
                     return None
                 elif resp.status_code == 429:
                     retry_header = resp.headers.get("Retry-After")
+                    if retry_header and retry_header.strip().isdigit() and int(retry_header) > 60:
+                        self._quota_unavailable_until = time.time() + min(
+                            int(retry_header), 3600
+                        )
+                        logger.warning(
+                            "OpenAlex quota window is unavailable; continuing with other registries."
+                        )
+                        return None
                     wait = self._limiter.trigger_backoff(retry_header, attempt=attempt)
                     time.sleep(wait)
                 elif resp.status_code in (500, 502, 503, 504):

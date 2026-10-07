@@ -128,7 +128,7 @@ class CrossrefClient:
         if not clean_query:
             return []
 
-        cache_key = f"{clean_query}__rows_{rows}"
+        cache_key = f"all_title_records_v2__{clean_query}__rows_{rows}"
         cached = self.cache.get("crossref_search", cache_key)
         if cached is not None:
             return cached.get("items", [])
@@ -141,7 +141,7 @@ class CrossrefClient:
         if data and "message" in data and "items" in data["message"]:
             for item in data["message"]["items"]:
                 meta = self._extract_metadata(item)
-                if meta.get("doi"):
+                if meta.get("title"):
                     candidates.append(meta)
 
         # Always cache search results, even if empty, to prevent re-querying

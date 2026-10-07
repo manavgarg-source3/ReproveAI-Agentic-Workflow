@@ -102,6 +102,41 @@ def test_section_segmenter_with_appendix():
     assert meta["trailing_section_stripped"] is True
 
 
+def test_section_segmenter_strips_spaced_small_caps_appendix_heading():
+    text = (
+        "Introduction\n" + ("Body text. " * 80) + "\n"
+        "REFERENCES\n"
+        "Ada Researcher and Grace Scientist. A reliable paper. Journal, 2020.\n"
+        "A L ARGE LANGUAGE MODELS STILL NEED PARAMETER UPDATES\n"
+        "Appendix discussion must not become a reference."
+    )
+
+    _body, references, metadata = segment_manuscript(text)
+
+    assert "A reliable paper" in references
+    assert "Appendix discussion" not in references
+    assert metadata["trailing_section_stripped"] is True
+
+
+def test_section_segmenter_strips_short_spaced_small_caps_appendix_heading():
+    text = (
+        "Introduction\n" + ("Body text. " * 80) + "\n"
+        "REFERENCES\n"
+        "Ligeng Zhu, Zhijian Liu, and Song Han. Deep leakage from gradients. "
+        "NeurIPS, 2019.\n"
+        "Yanlin Zhou, George Pu, Xiyao Ma, Xiaolin Li, and Dapeng Wu. "
+        "Distilled one-shot federated learning. arXiv:2009.07999, 2020.\n"
+        "A I MPLEMENTATION DETAILS\n"
+        "Dataset condensation experiments involve six hyperparameters."
+    )
+
+    _body, references, metadata = segment_manuscript(text)
+
+    assert "Deep leakage from gradients" in references
+    assert "Dataset condensation experiments" not in references
+    assert metadata["trailing_section_stripped"] is True
+
+
 def test_docx_document_extraction():
     # Create an in-memory test DOCX
     doc = Document()

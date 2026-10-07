@@ -101,21 +101,16 @@ def test_existing_pdf_endpoint_behavior(monkeypatch) -> None:
         "artifact_files": [],
         "experiment_artifact_maps": [],
         "environment_specifications": [],
-                        "reproduction_plans": [],
+        "reproduction_plans": [],
         "reproduction_targets": {
             "candidate_targets": [],
             "selected_target_id": None,
             "selected_target": None,
-            "selection_method": "Eligible candidates are ranked by deterministic evidence coverage score, then readiness status, then stable target ID.",
-            "notes": [
-                "No experiment met the minimum AI/ML target definition: dataset, model, metric, and published value."
-            ]
-        },
-        "reproduction_targets": {
-            "candidate_targets": [],
-            "selected_target_id": None,
-            "selected_target": None,
-            "selection_method": "Eligible candidates are ranked by deterministic evidence coverage score, then readiness status, then stable target ID.",
+            "selection_method": (
+                "Candidates require a dataset, evaluation split, single model configuration, "
+                "single metric, and published value; eligible candidates are ranked by "
+                "deterministic evidence coverage score, then readiness status, then stable target ID."
+            ),
             "notes": []
         },
         "research_case": None,
@@ -175,6 +170,19 @@ def test_environment_endpoint_continues_from_citation_result(monkeypatch) -> Non
         "experiment_artifact_maps": [],
         "environment_specifications": [],
         "reproduction_plans": [],
+        "reproduction_targets": {
+            "candidate_targets": [],
+            "selected_target_id": None,
+            "selected_target": None,
+            "selection_method": (
+                "Candidates require a dataset, evaluation split, single model configuration, "
+                "single metric, and published value; eligible candidates are ranked by "
+                "deterministic evidence coverage score, then readiness status, then stable target ID."
+            ),
+            "notes": [
+                "No experiment met the deterministic AI/ML target definition: dataset, evaluation split, single model configuration, single metric, and published value."
+            ],
+        },
         "research_case": expected_case,
     }
 
@@ -283,8 +291,13 @@ def test_primary_pipeline_returns_reconstructed_environment_without_duplicate_re
     plan = response.json()["reproduction_plans"][0]
     assert plan["experiment_id"] == "EXP-001"
     assert plan["environment_id"] == environment["environment_id"]
-    assert plan["status"] == "PARTIALLY_READY"
+    assert plan["status"] == "UNKNOWN"
     assert plan["notes"][0].startswith("PLANNED - NOT EXECUTED")
+    targets = response.json()["reproduction_targets"]
+    assert len(targets["candidate_targets"]) == 1
+    assert targets["candidate_targets"][0]["experiment_id"] == "EXP-001"
+    assert targets["candidate_targets"][0]["eligible"] is False
+    assert targets["selected_target"] is None
     assert response.json()["research_case"] is not None
     assert EnvironmentRepository.instances[0].content_calls == ["requirements.txt", "Dockerfile"]
 

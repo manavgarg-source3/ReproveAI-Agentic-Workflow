@@ -3,6 +3,7 @@ Compound bibliographic metadata matcher.
 Combines title, author, journal, year, volume, and pages into a calibrated score.
 """
 from typing import Dict, Any, Optional
+import re
 from rapidfuzz import fuzz
 
 from config import (
@@ -83,9 +84,11 @@ class MetadataMatcher:
         vol_match = bool(c_vol and r_vol and c_vol == r_vol)
         pages_match = False
         if c_pages and r_pages:
-            # Compare first page or full range
-            c_p1 = c_pages.split("-")[0].strip()
-            r_p1 = r_pages.split("-")[0].strip()
+            # PDF extraction commonly preserves an en/em dash while registries
+            # return an ASCII hyphen. Normalize separators before comparing the
+            # first page so this formatting difference cannot change ranking.
+            c_p1 = re.split(r"[-‐-―]", c_pages, maxsplit=1)[0].strip()
+            r_p1 = re.split(r"[-‐-―]", r_pages, maxsplit=1)[0].strip()
             if c_p1 and r_p1 and c_p1 == r_p1:
                 pages_match = True
 
@@ -95,15 +98,23 @@ class MetadataMatcher:
         elif vol_match or pages_match:
             vol_pages_score = 0.60
 
-        # Adjust weights if certain fields are missing from both cited & resolved
-        # Base weights: title=0.40, author=0.25, journal=0.15, year=0.10, vol_page=0.10
-        composite_score = (
-            (WEIGHT_TITLE * title_sim)
-            + (WEIGHT_AUTHOR * author_sim)
-            + (WEIGHT_JOURNAL * journal_sim)
-            + (WEIGHT_YEAR * year_score)
-            + (WEIGHT_VOLUME_PAGE * vol_pages_score)
+        # Score only fields that can actually be compared. Otherwise an exact
+        # arXiv-style citation with title, authors, and year can never reach the
+        # high-confidence threshold merely because it omits journal/volume/pages.
+        weighted_components = [
+            (WEIGHT_TITLE, title_sim, bool(c_title and r_title)),
+            (WEIGHT_AUTHOR, author_sim, bool(c_authors and r_authors)),
+            (WEIGHT_JOURNAL, journal_sim, bool(c_journal and r_journal)),
+            (WEIGHT_YEAR, year_score, bool(c_year and r_year)),
+            (WEIGHT_VOLUME_PAGE, vol_pages_score, bool((c_vol or c_pages) and (r_vol or r_pages))),
+        ]
+        available_weight = sum(weight for weight, _score, available in weighted_components if available)
+        weighted_score = sum(
+            weight * score
+            for weight, score, available in weighted_components
+            if available
         )
+        composite_score = weighted_score / available_weight if available_weight else 0.0
 
         return {
             "title_similarity": round(title_sim, 4),

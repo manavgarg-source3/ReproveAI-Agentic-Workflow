@@ -344,7 +344,10 @@ class GeminiResearchProvider:
                 timeout=int(self.timeout_seconds * 1000),
                 retry_options=types.HttpRetryOptions(
                     attempts=3,
-                    http_status_codes=[408, 500, 502, 503, 504],
+                    # A 503 means the selected model is temporarily unavailable.
+                    # Let ``analyze`` switch models immediately instead of making
+                    # several slow SDK retries before trying the configured fallback.
+                    http_status_codes=[408, 500, 502, 504],
                 ),
             ),
         )

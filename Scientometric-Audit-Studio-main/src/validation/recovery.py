@@ -4,6 +4,7 @@ Searches Crossref, OpenAlex, and Scopus to discover intended DOIs for citations 
 Includes provider availability checks, rate-limit fallback, and multi-registry ranking.
 """
 import logging
+import unicodedata
 from typing import Optional, Dict, Any, List, Tuple
 from src.providers.crossref import CrossrefClient
 from src.providers.openalex import OpenAlexClient
@@ -33,8 +34,8 @@ class DOIRecoveryEngine:
         Searches registries for the cited work.
         Returns (best_candidate_metadata, match_scores_dict).
         """
-        title = (cited_data.get("cited_title") or "").strip()
-        authors = (cited_data.get("cited_authors") or "").strip()
+        title = unicodedata.normalize("NFKC", cited_data.get("cited_title") or "").strip()
+        authors = unicodedata.normalize("NFKC", cited_data.get("cited_authors") or "").strip()
         year = cited_data.get("cited_year")
 
         if not title or len(title) < 10:
@@ -51,13 +52,6 @@ class DOIRecoveryEngine:
             except Exception as e:
                 logger.warning(f"Scopus search error: {e}")
 
-        # If Scopus already found a candidate with DOI, evaluate early
-        for cand in candidates:
-            if cand.get("doi"):
-                scores = MetadataMatcher.evaluate(cited_data, cand)
-                if scores["composite_score"] >= 0.85:
-                    return cand, scores
-
         # 2. Crossref Search (if available and not cooling down)
         if self.crossref.is_available():
             try:
@@ -66,8 +60,10 @@ class DOIRecoveryEngine:
             except Exception as e:
                 logger.warning(f"Crossref search error: {e}")
 
-        # 3. OpenAlex Search (if available and not cooling down)
-        if self.openalex.is_available() and len(candidates) < 3:
+        # 3. OpenAlex Search (if available and not cooling down). Query it even
+        # when Crossref returned candidates so independent registries can
+        # corroborate or correct the bibliographic match.
+        if self.openalex.is_available():
             try:
                 oa_results = self.openalex.search_by_title(title, rows=3)
                 candidates.extend(oa_results)
@@ -80,14 +76,30 @@ class DOIRecoveryEngine:
         # Evaluate all candidate metadata against cited fields
         best_candidate: Optional[Dict[str, Any]] = None
         best_scores: Dict[str, Any] = {"composite_score": 0.0, "title_similarity": 0.0}
+        best_rank = -1.0
+        best_no_doi_candidate: Optional[Dict[str, Any]] = None
+        best_no_doi_scores: Dict[str, Any] = {"composite_score": 0.0, "title_similarity": 0.0}
+        best_no_doi_rank = -1.0
 
         for cand in candidates:
-            doi = cand.get("doi")
-            if not doi:
-                continue
             scores = MetadataMatcher.evaluate(cited_data, cand)
-            if scores["composite_score"] > best_scores.get("composite_score", 0.0):
+            provider_priority = {"scopus": 0.05, "crossref": 0.04, "openalex": 0.0}.get(cand.get("provider", ""), 0.0)
+            rank = scores["composite_score"] + provider_priority
+            if cand.get("doi") and rank > best_rank:
                 best_scores = scores
                 best_candidate = cand
+                best_rank = rank
+            elif not cand.get("doi") and rank > best_no_doi_rank:
+                best_no_doi_scores = scores
+                best_no_doi_candidate = cand
+                best_no_doi_rank = rank
 
-        return best_candidate, best_scores
+        if best_candidate is not None:
+            return best_candidate, best_scores
+        if (
+            best_no_doi_candidate is not None
+            and best_no_doi_scores.get("title_similarity", 0.0) >= 0.90
+            and best_no_doi_scores.get("composite_score", 0.0) >= 0.65
+        ):
+            return best_no_doi_candidate, best_no_doi_scores
+        return None, best_scores

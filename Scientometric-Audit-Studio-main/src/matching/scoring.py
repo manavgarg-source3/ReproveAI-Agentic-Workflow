@@ -29,6 +29,12 @@ class DecisionEngine:
         doi_resolves = resolver_result.get("doi_resolves", False)
         http_status = resolver_result.get("http_status")
         redirects = resolver_result.get("redirect_count", 0)
+        strong_core_match = (
+            title_sim >= 0.95
+            and match_scores.get("author_similarity", 0.0) >= 0.55
+            and match_scores.get("year_match", False)
+            and composite >= 0.75
+        )
 
         # 1. DOI does not exist
         if not doi_exists or http_status == 404:
@@ -85,7 +91,7 @@ class DecisionEngine:
             )
 
         # 6. Correct Match
-        if composite >= HIGH_CONFIDENCE_THRESHOLD:
+        if composite >= HIGH_CONFIDENCE_THRESHOLD or strong_core_match:
             if redirects > 0:
                 return (
                     FinalStatus.VALID_REDIRECT_CORRECT,
@@ -153,16 +159,22 @@ class DecisionEngine:
         composite = match_scores.get("composite_score", 0.0)
         title_sim = match_scores.get("title_similarity", 0.0)
         doi = candidate_meta.get("doi", "")
+        strong_core_match = (
+            title_sim >= 0.98
+            and match_scores.get("author_similarity", 0.0) >= 0.30
+            and match_scores.get("year_match", False)
+            and composite >= 0.60
+        )
 
         if not doi:
             return (
                 FinalStatus.DOI_MISSING,
-                ConfidenceLevel.HIGH,
+                ConfidenceLevel.UNCERTAIN,
                 "Reference contains no explicit DOI and no candidate was discovered in external registries.",
-                False,
+                True,
             )
 
-        if composite >= HIGH_CONFIDENCE_THRESHOLD and title_sim >= 0.80:
+        if (composite >= HIGH_CONFIDENCE_THRESHOLD and title_sim >= 0.80) or strong_core_match:
             return (
                 FinalStatus.DOI_RECOVERED,
                 ConfidenceLevel.HIGH,
@@ -182,6 +194,6 @@ class DecisionEngine:
             FinalStatus.DOI_MISSING,
             ConfidenceLevel.UNCERTAIN,
             f"Reference has no DOI; nearest candidate had insufficient similarity (score {composite:.2f}).",
-            False,
+            True,
         )
 

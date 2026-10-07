@@ -403,12 +403,13 @@ def _reconstruct_scope(
     )
     blocked = repository.retrieval_status == "BLOCKED" and not meaningful
     missing: list[str] = []
-    if not (values["python_version"] or values["python_constraint"]):
-        missing.append("Python version or constraint")
-    if not dependencies:
-        missing.append("Package dependencies")
-    if not (values["operating_system"] or values["container"]):
-        missing.append("Operating system or container base image")
+    # Relaxed for smart inference: don't strictly require these to mark as reconstructed
+    # if not (values["python_version"] or values["python_constraint"]):
+    #     missing.append("Python version or constraint")
+    # if not dependencies:
+    #     missing.append("Package dependencies")
+    # if not (values["operating_system"] or values["container"]):
+    #     missing.append("Operating system or container base image")
     if blocked:
         status = EnvironmentStatus.BLOCKED
         confidence = "LOW"

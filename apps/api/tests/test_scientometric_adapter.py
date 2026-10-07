@@ -11,7 +11,9 @@ from app.schemas.research import (
 )
 from app.services.scholarly.scientometric_adapter import (
     ScientometricAdapter,
+    _parse_unnumbered_reference_fields,
     _parse_numbered_reference_fields,
+    _publication_year,
 )
 from app.services.scholarly.validation import validate_references
 
@@ -160,6 +162,63 @@ def test_missing_doi_and_incomplete_metadata_are_safe() -> None:
     assert received.cited_year is None
     assert received.extracted_doi == ""
     assert result.status == ReferenceValidationStatus.DOI_MISSING
+
+
+def test_missing_paper_doi_reports_external_recovery_provenance() -> None:
+    validator = FakeValidator(
+        engine_result(
+            "DOI_RECOVERED",
+            normalized_doi="10.5555/recovered",
+            metadata_source="openalex",
+        )
+    )
+    adapter = ScientometricAdapter(
+        validator=validator,
+        parsed_reference_type=FakeParsedReference,
+    )
+
+    result = adapter.validate_reference(make_reference(doi=None))
+
+    assert result.status == ReferenceValidationStatus.DOI_RECOVERED
+    assert result.normalized_doi == "10.5555/recovered"
+    assert result.source == "openalex"
+    assert "missing from the paper" in result.notes[0]
+    assert "OpenAlex" in result.notes[0]
+
+
+def test_registry_work_without_doi_is_distinct_from_not_found() -> None:
+    validator = FakeValidator(
+        engine_result(
+            "WORK_FOUND_NO_DOI",
+            normalized_doi="",
+            doi_resolves=False,
+            metadata_source="scopus",
+        )
+    )
+    adapter = ScientometricAdapter(
+        validator=validator,
+        parsed_reference_type=FakeParsedReference,
+    )
+
+    result = adapter.validate_reference(make_reference(doi=None))
+
+    assert result.status == ReferenceValidationStatus.WORK_FOUND_NO_DOI
+    assert result.normalized_doi is None
+    assert "Elsevier Scopus" in result.notes[0]
+
+
+def test_line_wrapped_author_reference_fields_ignore_arxiv_identifier_year() -> None:
+    citation = (
+        "Armen Aghajanyan, Luke Zettlemoyer, and Sonal Gupta. "
+        "Intrinsic Dimensionality Explains the Effectiveness of Language Model Fine-Tuning. "
+        "arXiv:2012.13255 [cs], December 2020."
+    )
+
+    title, authors = _parse_unnumbered_reference_fields(citation)
+
+    assert title == "Intrinsic Dimensionality Explains the Effectiveness of Language Model Fine-Tuning"
+    assert authors == ["Armen Aghajanyan", "Luke Zettlemoyer", "Sonal Gupta"]
+    assert _publication_year(citation) == 2020
 
 
 class MixedProvider:

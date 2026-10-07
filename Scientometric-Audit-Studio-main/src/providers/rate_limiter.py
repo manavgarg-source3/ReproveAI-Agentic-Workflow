@@ -17,10 +17,17 @@ class PoliteRateLimiter:
     pause when an API returns HTTP 429.
     """
 
-    def __init__(self, name: str, min_interval_seconds: float = 0.35, default_backoff_seconds: float = 5.0):
+    def __init__(
+        self,
+        name: str,
+        min_interval_seconds: float = 0.35,
+        default_backoff_seconds: float = 5.0,
+        max_backoff_seconds: float = 15.0,
+    ):
         self.name = name
         self.min_interval = min_interval_seconds
         self.default_backoff = default_backoff_seconds
+        self.max_backoff = max(default_backoff_seconds, max_backoff_seconds)
         self._lock = threading.Lock()
         self._last_request_time = 0.0
         self._backoff_until = 0.0
@@ -57,6 +64,10 @@ class PoliteRateLimiter:
             backoff_duration = self.default_backoff * (1.5 ** (attempt - 1))
             if retry_after_header and retry_after_header.strip().isdigit():
                 backoff_duration = max(float(retry_after_header) + 1.0, backoff_duration)
+            # Some APIs expose a quota-reset interval of many hours in this
+            # header. A synchronous paper analysis must fail over to the next
+            # registry instead of sleeping for that entire window.
+            backoff_duration = min(backoff_duration, self.max_backoff)
             
             now = time.time()
             self._backoff_until = max(self._backoff_until, now + backoff_duration)

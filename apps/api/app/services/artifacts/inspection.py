@@ -45,6 +45,7 @@ STOPWORDS = {
     "metric", "model", "on", "task", "test", "the", "train", "training", "using",
     "fine", "tune", "tuning", "performance", "results", "analysis", "with",
 }
+MODEL_QUALIFIERS = {"base", "large", "medium", "small", "tiny", "xxl", "xl"}
 
 
 def classify_repository_file(path: str) -> tuple[ArtifactFileType, ArtifactFileRole]:
@@ -84,7 +85,9 @@ def classify_repository_file(path: str) -> tuple[ArtifactFileType, ArtifactFileR
     }.get(suffix, ArtifactFileType.OTHER)
 
     searchable = f"{pure_path.parent.as_posix()} {stem}".casefold()
-    if re.search(r"train|finetun|fine[_-]?tun", searchable):
+    if "download" in searchable and "checkpoint" in searchable:
+        role = ArtifactFileRole.DATA_PREPARATION
+    elif re.search(r"(?:^|[/_\- ])train(?:$|[/_\- ])|finetun|fine[_-]?tun", searchable):
         role = ArtifactFileRole.TRAINING
     elif re.search(r"eval|evaluate|evaluation|benchmark", searchable):
         role = ArtifactFileRole.EVALUATION
@@ -151,16 +154,18 @@ def _classify_relevance(
     readme: str | None,
 ) -> tuple[FileRelevanceStatus, ArtifactConfidence, list[str]]:
     normalized_path = re.sub(r"[^a-z0-9]+", " ", path.casefold())
-    model_terms = _terms(experiment.model)
+    model_terms = _terms(experiment.model) - MODEL_QUALIFIERS
     specific_terms = _terms(
         experiment.dataset,
         experiment.split,
         experiment.metric,
         experiment.baseline,
-        experiment.objective,
     ) - model_terms
     matched_terms = sorted(
         term for term in specific_terms if term in normalized_path.split()
+    )
+    matched_model_terms = sorted(
+        term for term in model_terms if term in normalized_path.split()
     )
     readme_evidence = _readme_path_evidence(readme, path)
     readme_text = " ".join(readme_evidence).casefold()
@@ -171,10 +176,24 @@ def _classify_relevance(
         ArtifactStatus.PARTIAL,
     }
 
-    if matched_terms or readme_matches:
-        matched = sorted(set(matched_terms + readme_matches))
+    # Dataset mentions alone do not prove that a generic training script
+    # implements a specialized protocol such as neural architecture search or
+    # continual learning. Require protocol-specific path/README evidence before
+    # promoting such a file to RELEVANT.
+    objective = experiment.objective.casefold()
+    specialized_terms: tuple[str, ...] = ()
+    if "architecture search" in objective or re.search(r"\bnas\b", objective):
+        specialized_terms = ("nas", "architecture search")
+    elif "continual learning" in objective or "incremental learning" in objective:
+        specialized_terms = ("continual", "incremental")
+    specialized_match = not specialized_terms or any(
+        term in normalized_path or term in readme_text for term in specialized_terms
+    )
+
+    if matched_terms or matched_model_terms or readme_matches:
+        matched = sorted(set(matched_terms + matched_model_terms + readme_matches))
         evidence.append(f"Repository evidence matches experiment term(s): {', '.join(matched)}.")
-        if ambiguous:
+        if ambiguous or not specialized_match:
             return FileRelevanceStatus.POSSIBLY_RELEVANT, ArtifactConfidence.MEDIUM, evidence
         return FileRelevanceStatus.RELEVANT, ArtifactConfidence.HIGH, evidence
     if readme_evidence and role not in {
@@ -320,10 +339,18 @@ def inspect_artifacts(
                 item.role for item in mapped
                 if item.relevance_status == FileRelevanceStatus.POSSIBLY_RELEVANT
             }
+            directly_associated = artifact.experiment_id == experiment.id
+            preserve_uncertain_inspection = (
+                not metadata.accessible
+                or artifact.relationship_status in {
+                    ArtifactStatus.AMBIGUOUS,
+                    ArtifactStatus.PARTIAL,
+                }
+            )
             if (
-                artifact.experiment_id is not None
-                and artifact.experiment_id != experiment.id
+                not directly_associated
                 and not available_roles
+                and not preserve_uncertain_inspection
             ):
                 continue
             expected = _expected_roles(experiment)

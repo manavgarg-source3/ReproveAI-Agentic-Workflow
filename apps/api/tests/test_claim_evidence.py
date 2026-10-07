@@ -139,6 +139,41 @@ def test_claim_with_no_citation_is_explicitly_unassociated() -> None:
     assert assessments[0].requires_human_review is True
 
 
+def test_self_reported_claim_uses_uploaded_paper_excerpt_without_external_citation() -> None:
+    item = Claim(
+        id="CLM-SELF",
+        claim_text=(
+            "Adapting both Wq and Wv gives the best performance overall on WikiSQL "
+            "and MultiNLI given the same number of trainable parameters."
+        ),
+        claim_type="PERFORMANCE",
+        evidence_locations=["Table 5, page 8"],
+    )
+    paper_text = """
+    5 Experiments
+    Table 5: Validation accuracy on WikiSQL and MultiNLI after applying LoRA to
+    different attention weights, given the same number of trainable parameters.
+    Adapting both Wq and Wv gives the best performance overall.
+    References
+    [1] A. Author. Translation Study. 2020.
+    """
+
+    items, assessments = validate_claim_evidence(
+        paper_text,
+        analysis(item),
+        [validation()],
+        citation_mapper=StubMapper(set()),
+    )
+
+    assert items[0].source == "uploaded paper"
+    assert items[0].quality.value == "SOURCE_EXCERPT"
+    assert items[0].citation_location == "Table 5, page 8"
+    assert assessments[0].citation_status == CitationStatus.NO_ASSOCIATED_CITATION
+    assert assessments[0].support_status == ClaimSupportStatus.SUPPORTED
+    assert assessments[0].requires_human_review is False
+    assert "does not independently establish scientific truth" in assessments[0].explanation
+
+
 def test_engine_context_maps_numeric_citation_to_reference() -> None:
     scanner = lambda _body: ("NUMERIC_BRACKETED", [{
         "marker": "[1]", "unrolled_keys": [1],
@@ -279,6 +314,24 @@ class FakeOpenAlex:
         return self.work
 
 
+class FakeHttpResponse:
+    def __init__(self, text: str):
+        self.text = text
+
+    def raise_for_status(self):
+        return None
+
+
+class FakeHttpSession:
+    def __init__(self, text: str):
+        self.text = text
+        self.requested_url = None
+
+    def get(self, url, **_kwargs):
+        self.requested_url = url
+        return FakeHttpResponse(self.text)
+
+
 def test_source_retrieval_cleans_and_bounds_crossref_abstract() -> None:
     provider = ScientometricSourceEvidenceProvider(
         crossref=FakeCrossref({
@@ -319,3 +372,30 @@ def test_metadata_only_source_remains_non_evidentiary() -> None:
     result = provider.retrieve(reference(), validation())
     assert result.evidence_type == "METADATA_ONLY"
     assert result.excerpt is None
+
+
+def test_acl_anthology_abstract_is_used_when_registries_have_metadata_only() -> None:
+    acl_html = '''
+    <div class="card-body acl-abstract"><h5>Abstract</h5><span>
+    Pre-trained models have a very low intrinsic dimension and can be tuned in
+    a randomly projected low-dimensional subspace.
+    </span></div>
+    '''
+    http = FakeHttpSession(acl_html)
+    provider = ScientometricSourceEvidenceProvider(
+        crossref=FakeCrossref({"title": ["Intrinsic Dimensionality"]}),
+        openalex=FakeOpenAlex(),
+        http_session=http,
+        max_characters=500,
+    )
+    ref = reference().model_copy(update={"doi": None})
+    verified = validation().model_copy(
+        update={"normalized_doi": "10.18653/v1/2021.acl-long.568"}
+    )
+
+    result = provider.retrieve(ref, verified)
+
+    assert result.source == "ACL Anthology"
+    assert result.evidence_type == "ABSTRACT"
+    assert "low intrinsic dimension" in result.excerpt
+    assert http.requested_url == "https://aclanthology.org/2021.acl-long.568/"

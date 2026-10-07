@@ -23,7 +23,10 @@ from app.services.artifacts.inspection import inspect_artifacts
 from app.services.artifacts.repository import PublicRepositoryMetadataProvider
 from app.services.evidence.validation import validate_claim_evidence
 from app.services.environment.reconstruction import reconstruct_environments
-from app.services.reproduction.planning import generate_reproduction_plans
+from app.services.reproduction.planning import (
+    generate_reproduction_plans,
+    generate_reproduction_targets,
+)
 from app.services.scholarly.validation import validate_references
 from app.services.verification.case import build_research_case
 from app.services.execution.sandbox import execution_service
@@ -207,10 +210,22 @@ async def analyze_paper(file: UploadFile = File(...), stage: str = Query("all"))
         environment_specifications,
         extracted.text,
     )
+    reproduction_targets = await run_in_threadpool(
+        generate_reproduction_targets,
+        analysis,
+        reproduction_plans,
+        artifacts,
+        artifact_inspection.files,
+        artifact_inspection.experiment_maps,
+        environment_specifications,
+    )
+    execution_service.register_selection(reproduction_targets, artifacts)
     logger.info(
-        "Reproduction planning completed in %.2fs (plans=%d)",
+        "Reproduction planning completed in %.2fs (plans=%d, targets=%d, eligible=%d)",
         perf_counter() - stage_started,
         len(reproduction_plans),
+        len(reproduction_targets.candidate_targets),
+        sum(item.eligible for item in reproduction_targets.candidate_targets),
     )
     stage_started = perf_counter()
     research_case = await run_in_threadpool(
@@ -240,6 +255,7 @@ async def analyze_paper(file: UploadFile = File(...), stage: str = Query("all"))
         experiment_artifact_maps=artifact_inspection.experiment_maps,
         environment_specifications=environment_specifications,
         reproduction_plans=reproduction_plans,
+        reproduction_targets=reproduction_targets,
         research_case=research_case,
         analysis_context=AnalysisContextDiagnostics(
             total_characters=analysis_run.diagnostics.total_characters,
@@ -309,6 +325,16 @@ async def analyze_environment(request: AnalyzeEnvironmentRequest):
         environment_specifications,
         request.paper_text,
     )
+    reproduction_targets = await run_in_threadpool(
+        generate_reproduction_targets,
+        analysis,
+        reproduction_plans,
+        artifacts,
+        artifact_inspection.files,
+        artifact_inspection.experiment_maps,
+        environment_specifications,
+    )
+    execution_service.register_selection(reproduction_targets, artifacts)
     research_case = await run_in_threadpool(
         build_research_case,
         analysis,
@@ -326,6 +352,7 @@ async def analyze_environment(request: AnalyzeEnvironmentRequest):
         "experiment_artifact_maps": [m.model_dump() for m in artifact_inspection.experiment_maps],
         "environment_specifications": [e.model_dump() for e in environment_specifications],
         "reproduction_plans": [p.model_dump() for p in reproduction_plans],
+        "reproduction_targets": reproduction_targets.model_dump(),
         "research_case": research_case.model_dump(),
     }
 

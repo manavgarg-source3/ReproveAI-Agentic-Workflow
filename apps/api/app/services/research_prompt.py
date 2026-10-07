@@ -31,9 +31,23 @@ Rules:
    THEORETICAL, EMPIRICAL, or CONCLUSION.
 8. An experiment is an identifiable evaluation with an objective and, when the
    text provides them, a dataset, split, model, metric, baseline, and reported
-   result. Missing details must remain null.
+   result. Missing details must remain null. Each experiment record must describe
+   one reproducible dataset/split/model/metric/result tuple. Do not combine model
+   variants (for example, "base / large") or metrics (for example, "accuracy /
+   correlation") in one record when attaching a single scalar result. For a
+   multi-task benchmark aggregate, use the exact aggregate column label visible
+   in the paper (such as "Average") instead of inventing a slash-separated metric.
+   Do not create two experiment records for the same dataset, split, model,
+   images-per-class setting, metric, and result merely because one sentence calls
+   it "our method" and another describes the comparison. Treat competing methods
+   as baselines within the same evaluation unless they have a distinct result that
+   must be represented separately. When the paper states that standard train/test
+   splits are used, populate split="test" for reported testing accuracy results.
 9. A method is a research procedure, modeling technique, experimental protocol,
-   or analysis technique described by the authors. Do not infer unstated methods.
+   or analysis technique that the paper's authors actually propose or use in
+   their experiments. Exclude techniques mentioned only as related work,
+   background, or a cited prior method unless the paper explicitly uses them as
+   an experimental baseline. Do not infer unstated methods.
 10. A reported result is a value or outcome stated by the paper. It is not a
     verified or reproduced result. Normalize percentage-like metric values to a
     0-to-1 fraction only when the paper and metric make that interpretation clear.
@@ -47,7 +61,9 @@ Rules:
 13. Return valid JSON matching the supplied schema and no surrounding prose.
 14. Preserve reported values exactly where the supplied context supports them.
     Use visible section/page labels as evidence locations when a more specific
-    table, figure, or subsection identifier is not present. Never invent one.
+    table, figure, or subsection identifier is not present. Attach a numeric result
+    only when its row/column alignment with the dataset, split, model, and metric is
+    explicit in the supplied context. Never invent one.
 """.strip()
 
 

@@ -115,6 +115,7 @@ class StubProvider:
         ("requirements.txt", ArtifactFileType.DEPENDENCY, ArtifactFileRole.DEPENDENCY),
         ("configs/bert.yaml", ArtifactFileType.CONFIG, ArtifactFileRole.CONFIGURATION),
         ("scripts/launch.sh", ArtifactFileType.SHELL, ArtifactFileRole.EXECUTION_SCRIPT),
+        ("examples/NLG/download_pretrained_checkpoints.sh", ArtifactFileType.SHELL, ArtifactFileRole.DATA_PREPARATION),
         ("models/model.ckpt", ArtifactFileType.CHECKPOINT, ArtifactFileRole.CHECKPOINT),
         ("Dockerfile", ArtifactFileType.CONTAINER, ArtifactFileRole.CONFIGURATION),
         ("README.md", ArtifactFileType.DOCUMENTATION, ArtifactFileRole.DOCUMENTATION),
@@ -142,6 +143,96 @@ def test_bert_files_map_to_glue_and_squad_using_only_observed_paths() -> None:
     assert all(item.evidence for item in result.files)
     assert {item.readiness for item in result.experiment_maps} == {ArtifactReadiness.PARTIAL}
     assert {item.experiment_id for item in result.experiment_maps} == {"EXP-GLUE", "EXP-SQUAD"}
+
+
+def test_model_family_path_is_relevant_only_to_matching_experiment() -> None:
+    analysis = ResearchAnalysis(
+        paper=PaperMetadata(title="LoRA"),
+        experiments=[
+            Experiment(id="EXP-R", objective="Evaluate RoBERTa on GLUE", dataset="GLUE", model="RoBERTa large"),
+            Experiment(id="EXP-D", objective="Evaluate DeBERTa on GLUE", dataset="GLUE", model="DeBERTa XXL"),
+        ],
+    )
+    metadata = bert_metadata(
+        readme_excerpt="Repository experiment scripts.",
+        file_tree=[
+            RepositoryFileMetadata("examples/NLU/roberta_large_mnli.sh"),
+            RepositoryFileMetadata("examples/NLU/deberta_v2_xxlarge_mnli.sh"),
+        ],
+    )
+
+    result = inspect_artifacts(
+        [code_artifact()], analysis, repository_provider=StubProvider(metadata)
+    )
+    by_experiment = {
+        experiment_id: {
+            item.path: item.relevance_status
+            for item in result.files if item.experiment_id == experiment_id
+        }
+        for experiment_id in ("EXP-R", "EXP-D")
+    }
+
+    assert by_experiment["EXP-R"]["examples/NLU/roberta_large_mnli.sh"] == FileRelevanceStatus.RELEVANT
+    assert by_experiment["EXP-R"]["examples/NLU/deberta_v2_xxlarge_mnli.sh"] == FileRelevanceStatus.POSSIBLY_RELEVANT
+    assert by_experiment["EXP-D"]["examples/NLU/deberta_v2_xxlarge_mnli.sh"] == FileRelevanceStatus.RELEVANT
+    assert by_experiment["EXP-D"]["examples/NLU/roberta_large_mnli.sh"] == FileRelevanceStatus.POSSIBLY_RELEVANT
+
+
+def test_generic_method_word_does_not_map_roberta_checkpoint_to_gpt3() -> None:
+    analysis = ResearchAnalysis(
+        paper=PaperMetadata(title="LoRA"),
+        experiments=[Experiment(
+            id="EXP-GPT3",
+            objective="Apply LoRA to attention weights in GPT-3",
+            dataset="WikiSQL",
+            split="validation",
+            model="GPT-3 (Wk)",
+            metric="Validation accuracy",
+            reported_result=70.0,
+        )],
+    )
+    metadata = bert_metadata(
+        readme_excerpt=(
+            "LoRA checkpoints are available for RoBERTa NLU experiments.\n"
+            "Use examples/NLU/roberta_base_lora_mnli.bin for RoBERTa."
+        ),
+        file_tree=[
+            RepositoryFileMetadata("examples/NLU/roberta_base_lora_mnli.bin"),
+            RepositoryFileMetadata("examples/NLU/ds_config.json"),
+        ],
+    )
+
+    result = inspect_artifacts(
+        [code_artifact()], analysis, repository_provider=StubProvider(metadata)
+    )
+
+    assert not any(item.experiment_id == "EXP-GPT3" for item in result.files)
+    assert not any(item.experiment_id == "EXP-GPT3" for item in result.experiment_maps)
+
+
+def test_dataset_script_is_not_promoted_to_relevant_for_nas_without_nas_evidence() -> None:
+    analysis = ResearchAnalysis(
+        paper=PaperMetadata(title="Dataset Condensation"),
+        experiments=[Experiment(
+            id="EXP-NAS",
+            objective="Perform neural architecture search on CIFAR10",
+            dataset="CIFAR10", split="test", model="ConvNets",
+            metric="testing accuracy", reported_result=84.5,
+        )],
+    )
+    metadata = bert_metadata(
+        readme_excerpt="Run main.py on CIFAR10 for dataset condensation.",
+        file_tree=[RepositoryFileMetadata("main.py")],
+    )
+
+    result = inspect_artifacts(
+        [code_artifact(experiment_id="EXP-NAS")],
+        analysis,
+        repository_provider=StubProvider(metadata),
+    )
+
+    nas_file = next(item for item in result.files if item.experiment_id == "EXP-NAS")
+    assert nas_file.relevance_status == FileRelevanceStatus.POSSIBLY_RELEVANT
 
 
 def test_missing_and_unknown_roles_are_explicit() -> None:

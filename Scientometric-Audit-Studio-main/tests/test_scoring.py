@@ -83,3 +83,55 @@ def test_doi_recovered():
     assert status == FinalStatus.DOI_RECOVERED
     assert conf == ConfidenceLevel.HIGH
 
+
+def test_sparse_exact_core_metadata_can_recover_doi_with_high_confidence():
+    match_scores = {
+        "composite_score": 0.80,
+        "title_similarity": 0.99,
+        "author_similarity": 0.75,
+        "year_match": True,
+    }
+    candidate = {"doi": "10.18653/v1/example"}
+    resolver_result = {"doi_exists": True, "doi_resolves": True, "http_status": 200}
+
+    status, confidence, _rationale, review = DecisionEngine.classify_recovered_doi(
+        match_scores,
+        candidate,
+        resolver_result,
+    )
+
+    assert status == FinalStatus.DOI_RECOVERED
+    assert confidence == ConfidenceLevel.HIGH
+    assert review is False
+
+
+def test_exact_title_and_year_tolerate_pdf_damaged_author_diacritics():
+    match_scores = {
+        "composite_score": 0.64,
+        "title_similarity": 1.0,
+        "author_similarity": 0.37,
+        "year_match": True,
+    }
+    candidate = {"doi": "10.18653/v1/2021.emnlp-main.626"}
+    resolver_result = {"doi_exists": True, "doi_resolves": True, "http_status": 200}
+
+    status, confidence, _rationale, review = DecisionEngine.classify_recovered_doi(
+        match_scores, candidate, resolver_result
+    )
+
+    assert status == FinalStatus.DOI_RECOVERED
+    assert confidence == ConfidenceLevel.HIGH
+    assert review is False
+
+
+def test_missing_doi_without_registry_candidate_requires_review():
+    status, confidence, _rationale, review = DecisionEngine.classify_recovered_doi(
+        {"composite_score": 0.0, "title_similarity": 0.0},
+        {},
+        {},
+    )
+
+    assert status == FinalStatus.DOI_MISSING
+    assert confidence == ConfidenceLevel.UNCERTAIN
+    assert review is True
+

@@ -53,11 +53,51 @@ function References({ items }: { items: Reference[] }) {
   return <ol className="result-list list-decimal pl-5">{items.map((reference) => <li key={reference.id} className="result-item pl-1"><p>{reference.citation_text}</p></li>)}</ol>;
 }
 
-function validationTone(status: string) {
-  if (["VALID_CORRECT", "VALID_REDIRECT_CORRECT", "DOI_RECOVERED"].includes(status)) return "validation-good";
-  if (["VALID_DOI_WRONG_REFERENCE", "INVALID_DOI", "BROKEN_URL", "ERROR"].includes(status)) return "validation-bad";
-  if (["SOURCE_UNAVAILABLE", "DOI_MISSING", "UNVERIFIED"].includes(status)) return "validation-neutral";
-  return "validation-review";
+function registryName(source: string | null) {
+  const normalized = source?.toLowerCase();
+  if (normalized === "openalex") return "OpenAlex";
+  if (normalized === "crossref") return "Crossref";
+  if (normalized === "scopus" || normalized === "scopus_index") return "Elsevier Scopus";
+  return source ?? "No registry";
+}
+
+function validationOutcome(item: ReferenceValidation) {
+  const registry = registryName(item.source);
+  const score = item.metadata_match_score ?? 0;
+
+  if (item.status === "ACCESS_RESTRICTED") {
+    const metadataVerified = score >= 0.65;
+    return {
+      good: metadataVerified,
+      label: metadataVerified ? "DOI VERIFIED" : "NOT VERIFIED",
+      summary: metadataVerified
+        ? `The DOI was found in the paper and its metadata was verified by ${registry}. The publisher page is access restricted.`
+        : "The DOI was found in the paper, but the metadata match is inconclusive and the publisher page is access restricted.",
+      accessRestricted: true,
+    };
+  }
+
+  if (["VALID_CORRECT", "VALID_REDIRECT_CORRECT"].includes(item.status)) {
+    return { good: true, label: "DOI VERIFIED", summary: `The DOI was found in the paper and verified by ${registry}.`, accessRestricted: false };
+  }
+  if (item.status === "DOI_RECOVERED") {
+    return { good: true, label: "DOI RESOLVED", summary: `The paper did not provide a DOI. ${registry} resolved this reference to ${item.normalized_doi}.`, accessRestricted: false };
+  }
+  if (["WORK_FOUND_NO_DOI", "SCOPUS_LINKED_NO_DOI"].includes(item.status)) {
+    return { good: true, label: "WORK VERIFIED", summary: `The paper did not provide a DOI. ${registry} verified the publication record, but no registered DOI was found.`, accessRestricted: false };
+  }
+  if (item.status === "DOI_RECOVERY_UNCERTAIN") {
+    return { good: false, label: "REVIEW REQUIRED", summary: `The paper did not provide a DOI. ${registry} returned ${item.normalized_doi ?? "a possible match"}, but the match is not verified.`, accessRestricted: false };
+  }
+  if (item.status === "DOI_MISSING") {
+    return { good: false, label: "NOT VERIFIED", summary: "The paper did not provide a DOI, and no matching publication record was confidently verified by Crossref, OpenAlex, or Elsevier Scopus.", accessRestricted: false };
+  }
+  return {
+    good: false,
+    label: "NOT VERIFIED",
+    summary: item.input_doi ? `The DOI was found in the paper, but it could not be verified by ${registry}.` : `The reference could not be verified by ${registry}.`,
+    accessRestricted: false,
+  };
 }
 
 function ReferenceValidationResults({
@@ -72,24 +112,29 @@ function ReferenceValidationResults({
 
   return (
     <div className="grid gap-3">
-      {items.map((item) => (
-        <article key={item.reference_id} className="validation-item">
+      {items.map((item) => {
+        const outcome = validationOutcome(item);
+        const registry = registryName(item.source);
+        return (
+        <article key={item.reference_id} className={`validation-item ${outcome.good ? "validation-card-good" : "validation-card-bad"}`}>
           <div className="min-w-0">
             <p className="line-clamp-2 text-sm font-medium leading-6 text-slate-800">
               {citations.get(item.reference_id) ?? item.matched_title ?? item.reference_id}
             </p>
-            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
-              <span>DOI: {item.normalized_doi ?? item.input_doi ?? "Not provided"}</span>
-              <span>Source: {item.source ?? "—"}</span>
-              <span>Match: {item.metadata_match_score === null ? "—" : `${Math.round(item.metadata_match_score * 100)}%`}</span>
+            <p className={`validation-summary ${outcome.good ? "text-emerald-800" : "text-red-800"}`}>{outcome.summary}</p>
+            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
+              <span><strong>Paper DOI:</strong> {item.input_doi ? `${item.input_doi} (found in paper)` : "Not provided"}</span>
+              {item.normalized_doi && item.normalized_doi !== item.input_doi && <span><strong>Resolved DOI:</strong> {item.normalized_doi}</span>}
+              <span><strong>Verification source:</strong> {item.source ? registry : "None"}</span>
+              <span><strong>Metadata match:</strong> {item.metadata_match_score === null ? "—" : `${Math.round(item.metadata_match_score * 100)}%`}</span>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2 sm:justify-end">
-            <span className={`validation-badge ${validationTone(item.status)}`}>{item.status.replaceAll("_", " ")}</span>
-            {item.needs_human_review && <span className="review-flag">Review</span>}
+            <span className={`validation-badge ${outcome.good ? "validation-good" : "validation-bad"}`}>{outcome.good ? "✓" : "✕"} {outcome.label}</span>
+            {outcome.accessRestricted && <span className="access-restricted-flag">ACCESS RESTRICTED</span>}
           </div>
         </article>
-      ))}
+      )})}
     </div>
   );
 }
@@ -97,7 +142,7 @@ function ReferenceValidationResults({
 function supportTone(status: string) {
   if (status === "SUPPORTED") return "evidence-supported";
   if (status === "PARTIALLY_SUPPORTED") return "evidence-partial";
-  if (["NOT_SUPPORTED", "CONTRADICTED"].includes(status)) return "evidence-negative";
+  if (["NOT_SUPPORTED", "CONTRADICTED", "SOURCE_UNAVAILABLE"].includes(status)) return "evidence-negative";
   return "evidence-unclear";
 }
 
@@ -138,9 +183,16 @@ function ClaimEvidenceResults({
             {items.map((item) => (
               <div key={item.evidence_id} className="evidence-trace">
                 <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
-                  <span>Citation: {item.citation_marker ?? "Not identified"}</span>
-                  <span>Reference: {item.reference_id ?? "Not identified"}</span>
-                  <span>Source: {item.source ?? "Unavailable"}</span>
+                  {item.source === "uploaded paper" ? (
+                    <span>Evidence origin: Uploaded paper</span>
+                  ) : (
+                    <>
+                      <span>Citation: {item.citation_marker ?? "Not identified"}</span>
+                      <span>Reference: {item.reference_id ?? "Not identified"}</span>
+                    </>
+                  )}
+                  {item.source !== "uploaded paper" && <span>Source: {item.source ?? "Unavailable"}</span>}
+                  {item.citation_location && <span>Location: {item.citation_location}</span>}
                   <span>Quality: {item.quality.replaceAll("_", " ")}</span>
                 </div>
                 {item.citation_context && <p className="mt-3 text-sm leading-6 text-slate-700"><span className="font-semibold text-slate-900">Citation context:</span> “{item.citation_context}”</p>}
@@ -151,7 +203,7 @@ function ClaimEvidenceResults({
               </div>
             ))}
 
-            {!items.length && <p className="mt-4 text-sm text-slate-600">No citation was confidently associated with this claim.</p>}
+            {!items.length && <p className="mt-4 text-sm text-slate-600">No supporting paper passage or external citation evidence was confidently associated with this claim.</p>}
             <div className="mt-4 border-t border-slate-200 pt-4">
               <p className="text-sm leading-6 text-slate-700"><span className="font-semibold text-slate-950">Assessment:</span> {assessment.explanation}</p>
               {!!assessment.unresolved_questions.length && <div className="mt-3"><p className="text-xs font-bold uppercase tracking-[0.1em] text-slate-500">Unresolved</p><ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-600">{assessment.unresolved_questions.map((question) => <li key={question}>{question}</li>)}</ul></div>}
@@ -297,7 +349,7 @@ function EnvironmentReconstructionResults({ envs, experiments, artifacts }: { en
 
 const terminalExecutionStatuses: string[] = ["COMPLETED", "FAILED", "BLOCKED", "CANCELLED", "TIMED_OUT", "INTERRUPTED"];
 
-function ReproductionTargetResults({ selection }: { selection: ReproductionTargetSelection }) {
+function ReproductionTargetResults({ selection, planCount }: { selection: ReproductionTargetSelection; planCount: number }) {
   const target = selection.selected_target;
   const [approver, setApprover] = useState("");
   const [approval, setApproval] = useState<ExecutionApproval | null>(null);
@@ -315,13 +367,33 @@ function ReproductionTargetResults({ selection }: { selection: ReproductionTarge
   if (!target) return <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-xs leading-5 text-amber-900">
     <p className="font-semibold">No eligible primary AI/ML target</p>
     <p>{selection.notes.join(" ") || "Candidate evidence was insufficient for deterministic selection."}</p>
-    <p className="mt-1">Candidates preserved: {selection.candidate_targets.length}</p>
+    <div className="mt-2 grid gap-1 sm:grid-cols-2">
+      <p>Experiment-level plans: {planCount}</p>
+      <p>Preserved target candidates: {selection.candidate_targets.length}</p>
+      <p>Eligible target candidates: {selection.candidate_targets.filter(item => item.eligible).length}</p>
+    </div>
+    {selection.candidate_targets.length > 0 && <details className="mt-3 border-t border-amber-200 pt-3">
+      <summary className="cursor-pointer font-semibold">Why candidates were not selected</summary>
+      <ul className="mt-2 space-y-2">
+        {selection.candidate_targets.filter(item => !item.eligible).map(item => {
+          const identityIssues = item.missing_requirements.filter(issue =>
+            ["dataset identity", "model identity", "metric", "target"].includes(issue.category)
+            || issue.requirement === "dataset split"
+          );
+          return <li key={item.target_id}>
+            <span className="font-semibold">{item.objective}</span>
+            <span className="block">{identityIssues.length ? identityIssues.map(issue => issue.detail).join(" ") : item.selection_reason}</span>
+          </li>;
+        })}
+      </ul>
+    </details>}
   </div>;
   const missing = target.missing_requirements;
+  const executionReady = target.readiness_status === "READY_FOR_EXECUTION";
   return <article className="readiness-card mt-5 border-indigo-200 bg-indigo-50/30">
     <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
       <div>
-        <p className="text-[0.68rem] font-bold uppercase tracking-[0.14em] text-indigo-700">Selected AI/ML reproduction target</p>
+        <p className="text-[0.68rem] font-bold uppercase tracking-[0.14em] text-indigo-700">Selected AI/ML planning target</p>
         <h4 className="mt-1 text-base font-semibold text-slate-950">{target.objective}</h4>
         <p className="mt-1 font-mono text-[0.68rem] text-slate-500">{target.target_id}</p>
       </div>
@@ -354,13 +426,16 @@ function ReproductionTargetResults({ selection }: { selection: ReproductionTarge
     <div className="mt-4 space-y-3 text-xs leading-5 text-slate-600">
       <p><span className="font-semibold text-slate-800">Relevant files:</span> {target.file_mappings.length ? target.file_mappings.map(item => `${item.path} (${item.role.replaceAll("_", " ")})`).join(", ") : "None mapped"}</p>
       <p><span className="font-semibold text-slate-800">Configuration:</span> {target.configuration_files.length ? target.configuration_files.join(", ") : "None mapped"}</p>
-      <p><span className="font-semibold text-slate-800">Dependencies:</span> {target.dependency_requirements.length ? target.dependency_requirements.map(item => `${item.name}${item.version_constraint ? ` ${item.version_constraint}` : ""}`).join(", ") : "None reconstructed"}</p>
+      <details>
+        <summary className="cursor-pointer font-semibold text-slate-800">Dependencies ({target.dependency_requirements.length})</summary>
+        <p className="mt-1">{target.dependency_requirements.length ? target.dependency_requirements.map(item => `${item.name}${item.version_constraint ? ` ${item.version_constraint}` : ""}`).join(", ") : "None reconstructed"}</p>
+      </details>
       <p><span className="font-semibold text-slate-800">Hardware:</span> {target.hardware_requirements.length ? target.hardware_requirements.map(item => `${item.category}: ${item.value}`).join(", ") : "UNKNOWN"}</p>
       <p><span className="font-semibold text-slate-800">Documented command:</span> {target.documented_command ? <><code className="rounded bg-slate-100 px-1 py-0.5">{target.documented_command.command}</code>{target.documented_command_phase ? ` · ${target.documented_command_phase.replaceAll("_", " ")}` : ""}</> : "None identified"}</p>
       <p><span className="font-semibold text-slate-800">Required inputs:</span> {target.required_inputs.length ? target.required_inputs.join(", ") : "None identified"}</p>
       <div><p className="font-semibold text-slate-800">Missing requirements ({missing.length})</p>{missing.length ? <ul className="mt-1 list-disc pl-5">{missing.map((item, index) => <li key={`${item.category}-${item.requirement}-${index}`}>{item.requirement}: {item.detail}</li>)}</ul> : <p>None identified.</p>}</div>
     </div>
-    <div className="mt-5 rounded-xl border-2 border-red-200 bg-red-50 p-4 text-xs leading-5 text-red-950">
+    {executionReady ? <div className="mt-5 rounded-xl border-2 border-red-200 bg-red-50 p-4 text-xs leading-5 text-red-950">
       <p className="font-bold uppercase tracking-wide">Warning: untrusted research code</p>
       <p className="mt-1">Approval authorizes one original execution attempt inside the Docker sandbox. Completion means only that the process finished; it does not establish scientific reproduction.</p>
       <div className="mt-3 grid gap-2 sm:grid-cols-3">
@@ -403,7 +478,11 @@ function ReproductionTargetResults({ selection }: { selection: ReproductionTarge
         {run.status === "INTERRUPTED" && <p className="mt-2 font-semibold text-amber-800">Execution was interrupted and was not automatically re-executed.</p>}
         <details className="mt-2"><summary className="cursor-pointer font-semibold">Bounded execution details</summary><pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-slate-100 p-2">{run.stdout || "No stdout"}{run.stderr ? `\nSTDERR:\n${run.stderr}` : ""}</pre></details>
       </div>}
-    </div>
+    </div> : <div className="mt-5 rounded-xl border border-amber-300 bg-amber-50 p-4 text-xs leading-5 text-amber-950">
+      <p className="font-bold uppercase tracking-wide">Execution unavailable</p>
+      <p className="mt-1">This candidate is preserved for planning, but it cannot be approved or executed because its readiness status is {target.readiness_status.replaceAll("_", " ")}.</p>
+      <p className="mt-1">Resolve the missing requirements and regenerate the plan before requesting human approval.</p>
+    </div>}
   </article>;
 }
 
@@ -646,8 +725,8 @@ function Results({ result }: { result: AnalysisResponse }) {
         </article>
         <article className="result-card lg:col-span-2">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-            <div><p className="section-number">07 / Claim Evidence</p><h3 className="mt-3 text-lg font-semibold text-slate-950">Citation-support assessment</h3></div>
-            <p className="max-w-md text-xs leading-5 text-slate-500 sm:text-right">This compares author claims with available cited-source text. Support does not establish that a scientific claim is true.</p>
+            <div><p className="section-number">07 / Claim Evidence</p><h3 className="mt-3 text-lg font-semibold text-slate-950">Claim-evidence assessment</h3></div>
+            <p className="max-w-md text-xs leading-5 text-slate-500 sm:text-right">This checks claims against passages in the uploaded paper and available cited-source text. Textual support does not establish that a scientific claim is true.</p>
           </div>
           <div className="mt-5"><ClaimEvidenceResults claims={claims} assessments={result.claim_evidence} evidence={result.evidence_items} /></div>
         </article>
@@ -662,9 +741,9 @@ function Results({ result }: { result: AnalysisResponse }) {
         </article>
         <article className="result-card lg:col-span-2">
           <div><p className="section-number">09 / Reproduction Plans</p><h3 className="mt-3 text-lg font-semibold text-slate-950">Future execution specifications</h3><p className="mt-1 text-xs leading-5 text-slate-500">Evidence-backed planning only. No repository code, command, installation, download, or experiment has been executed.</p></div>
-          <ReproductionTargetResults key={result.reproduction_targets.selected_target_id ?? "no-target"} selection={result.reproduction_targets} />
+          <ReproductionTargetResults key={result.reproduction_targets.selected_target_id ?? "no-target"} selection={result.reproduction_targets} planCount={result.reproduction_plans.length} />
           <details className="mt-5 border-t border-slate-200 pt-4">
-            <summary className="cursor-pointer text-xs font-semibold text-slate-800">All candidate reproduction plans ({result.reproduction_plans.length})</summary>
+            <summary className="cursor-pointer text-xs font-semibold text-slate-800">All experiment-level reproduction plans ({result.reproduction_plans.length})</summary>
             <ReproductionPlanResults plans={result.reproduction_plans} experiments={experiments} />
           </details>
         </article>

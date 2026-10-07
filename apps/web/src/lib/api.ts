@@ -506,7 +506,11 @@ export interface AnalysisResponse {
 }
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-const ANALYSIS_TIMEOUT_MS = 3 * 60 * 1000;
+// A multi-chunk paper analysis may need several Gemini retries before falling
+// back to the secondary model. Keep the browser request alive long enough for
+// the API to return the completed audit instead of discarding a valid result.
+const ANALYSIS_TIMEOUT_MINUTES = 10;
+const ANALYSIS_TIMEOUT_MS = ANALYSIS_TIMEOUT_MINUTES * 60 * 1000;
 
 function apiErrorDetail(body: unknown, fallback: string): string {
   if (!body || typeof body !== "object" || !("detail" in body)) return fallback;
@@ -573,7 +577,9 @@ export async function analyzePaper(file: File, stage: 'citation' | 'all' = 'all'
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "TimeoutError") {
-      throw new Error("The audit exceeded three minutes. Check the API log for the slow stage.");
+      throw new Error(
+        `The audit exceeded ${ANALYSIS_TIMEOUT_MINUTES} minutes. Check the API log for the slow stage.`,
+      );
     }
     throw new Error(`Could not reach the analysis API at ${API_URL}. Make sure the backend is running.`);
   }

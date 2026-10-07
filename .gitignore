@@ -16,3 +16,9 @@ out/
 
 .data/
 apps/api/.data/
+
+venv_dc/
+DatasetCondensation/
+data/
+patch_*.py
+test_main.py

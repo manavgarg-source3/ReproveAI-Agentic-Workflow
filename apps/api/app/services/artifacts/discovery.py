@@ -100,8 +100,21 @@ def _location_before(text: str, offset: int) -> str | None:
 
 
 def _classify_url(url: str, context: str) -> ArtifactType | None:
+    parsed = urllib.parse.urlsplit(url)
+    hostname = parsed.hostname.casefold() if parsed.hostname else ""
+    path = parsed.path.casefold()
+
+    paper_domains = {
+        "arxiv.org", "www.arxiv.org",
+        "aclanthology.org", "www.aclanthology.org",
+        "doi.org", "www.doi.org",
+        "dl.acm.org", "ieeexplore.ieee.org",
+        "proceedings.mlr.press", "neurips.cc"
+    }
+    if hostname in paper_domains:
+        return None
+
     lowered = f"{url} {context}".casefold()
-    path = urllib.parse.urlsplit(url).path.casefold()
     filename = path.rsplit("/", 1)[-1]
     if filename in {"requirements.txt", "pyproject.toml", "setup.py", "environment.yml", "environment.yaml", "package.json"}:
         return ArtifactType.DEPENDENCY
@@ -111,7 +124,7 @@ def _classify_url(url: str, context: str) -> ArtifactType | None:
         return ArtifactType.EXECUTION_SCRIPT
     if filename.endswith((".yaml", ".yml", ".toml", ".ini", ".cfg", ".json")) and "dataset" not in lowered:
         return ArtifactType.CONFIG
-    if filename.endswith((".ckpt", ".pth", ".pt", ".safetensors", ".bin")) or "checkpoint" in lowered:
+    if filename.endswith((".ckpt", ".pth", ".pt", ".safetensors", ".bin")):
         return ArtifactType.CHECKPOINT
     try:
         parse_repository_url(url)
@@ -133,7 +146,10 @@ def _associate_experiment(context: str, experiments: list[Experiment]) -> str | 
     best_id = None
     best_score = 0.0
     for experiment in experiments:
-        terms = [experiment.dataset, experiment.model, experiment.metric, experiment.objective]
+        # Repository links may sit near a broad method discussion shared by many
+        # experiments. Only dataset/model identity is discriminative enough for
+        # direct association; objectives and generic metrics create false links.
+        terms = [experiment.dataset, experiment.model]
         score = max(
             (token_set_ratio(term, context) for term in terms if term and len(term) >= 3),
             default=0.0,
@@ -141,7 +157,7 @@ def _associate_experiment(context: str, experiments: list[Experiment]) -> str | 
         if score > best_score:
             best_score = score
             best_id = experiment.id
-    return best_id if best_score >= 65.0 else None
+    return best_id if best_score >= 80.0 else None
 
 
 def _repository_relationship(
@@ -246,9 +262,19 @@ def discover_artifacts(
             source = parse_repository_url(repository)[0]
         except ValueError:
             pass
+        name = repository.rsplit("/", 1)[-1] if repository else None
+        if not name:
+            parsed_url = urllib.parse.urlsplit(normalized)
+            if parsed_url.path and parsed_url.path != "/":
+                name = parsed_url.path.strip("/").split("/")[-1].replace("-", " ").replace("_", " ")
+                if not name:
+                    name = parsed_url.hostname
+            else:
+                name = parsed_url.hostname
+
         candidate = _Candidate(
             type=artifact_type,
-            name=(repository.rsplit("/", 1)[-1] if repository else None),
+            name=name,
             source_url=normalized,
             discovery_method=(
                 ArtifactDiscoveryMethod.SUPPLEMENTARY_LINK

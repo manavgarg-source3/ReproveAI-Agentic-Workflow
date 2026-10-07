@@ -8,9 +8,41 @@ from app.services.document.models import DocumentSection, SectionType
 NUMBERED_HEADING = re.compile(r"^\s*\d+(?:\.\d+)*\.?\s+([A-Z][^.!?]{1,90})\s*$")
 ROMAN_HEADING = re.compile(r"^\s*[IVXLC]+\.?\s+([A-Z][^.!?]{1,90})\s*$")
 
+SPACED_SMALL_CAP_WORDS = {
+    "A BSTRACT": "ABSTRACT",
+    "B ACKGROUND": "BACKGROUND",
+    "C ONCLUSION": "CONCLUSION",
+    "C ONCLUSIONS": "CONCLUSIONS",
+    "D ATA": "DATA",
+    "D ATASET": "DATASET",
+    "D ATASETS": "DATASETS",
+    "D ISCUSSION": "DISCUSSION",
+    "E VALUATION": "EVALUATION",
+    "E XPERIMENT": "EXPERIMENT",
+    "E XPERIMENTS": "EXPERIMENTS",
+    "I MPLEMENTATION": "IMPLEMENTATION",
+    "I NTRODUCTION": "INTRODUCTION",
+    "L IMITATIONS": "LIMITATIONS",
+    "M ETHOD": "METHOD",
+    "M ETHODS": "METHODS",
+    "M ETHODOLOGY": "METHODOLOGY",
+    "R EFERENCES": "REFERENCES",
+    "R ELATED": "RELATED",
+    "R ESULT": "RESULT",
+    "R ESULTS": "RESULTS",
+}
+
+
+def _repair_spaced_small_caps(title: str) -> str:
+    value = title
+    for broken, repaired in SPACED_SMALL_CAP_WORDS.items():
+        value = re.sub(rf"\b{re.escape(broken)}\b", repaired, value, flags=re.IGNORECASE)
+    return value
+
 
 def normalize_heading(title: str) -> str:
     value = re.sub(r"^\s*(?:\d+(?:\.\d+)*|[IVXLC]+)\.?\s+", "", title.strip(), flags=re.IGNORECASE)
+    value = _repair_spaced_small_caps(value)
     value = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
     return value
 
@@ -28,6 +60,8 @@ def classify_section(title: str) -> SectionType:
         return SectionType.BACKGROUND
     if "methodology" in words:
         return SectionType.METHODOLOGY
+    if {"dataset", "condensation"} <= words:
+        return SectionType.METHODS
     if words & {"architecture", "model", "training"}:
         return SectionType.MODEL
     if "dataset" in words or "datasets" in words:

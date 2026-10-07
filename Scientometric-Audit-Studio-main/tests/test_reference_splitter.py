@@ -29,3 +29,39 @@ def test_suspicious_flags():
     refs = ReferenceSplitter.split(raw, source_eid="test_doc_3")
     assert any(r.needs_review for r in refs)
 
+
+def test_line_wrapped_author_year_bibliography_splits_each_entry():
+    blob = (
+        "Armen Aghajanyan, Luke Zettlemoyer, and Sonal Gupta. Intrinsic Dimensionality Explains the\n"
+        "Effectiveness of Language Model Fine-Tuning. arXiv:2012.13255 [cs], December 2020. URL\n"
+        "http://arxiv.org/abs/2012.13255.\n"
+        "Zeyuan Allen-Zhu and Yuanzhi Li. What Can ResNet Learn Efficiently, Going Beyond Kernels? In\n"
+        "NeurIPS, 2019. Full version available at http://arxiv.org/abs/1905.10337.\n"
+        "Jimmy Lei Ba, Jamie Ryan Kiros, and Geoffrey E. Hinton. Layer normalization, 2016.\n"
+    )
+
+    references = ReferenceSplitter.split_manuscript_references(blob)
+
+    assert len(references) == 3
+    assert references[0].startswith("Armen Aghajanyan")
+    assert references[1].startswith("Zeyuan Allen-Zhu")
+    assert references[2].startswith("Jimmy Lei Ba")
+
+
+def test_inline_author_after_terminal_year_starts_a_new_reference():
+    blob = (
+        "Geoffrey Hinton, Oriol Vinyals, and Jeff Dean. Distilling the knowledge in a neural "
+        "network, 2015. Jonathan J. Hull. A database for handwritten text recognition research. "
+        "IEEE Transactions on Pattern Analysis and Machine Intelligence, 16(5):550-554, 1994.\n"
+        "Ricardo Henao. A study presented at CVPR 2009.\n"
+        "IEEE Conference on, pp. 1-8. Ieee, 2009. "
+        "Justin Domke. Generic methods for optimization-based modeling. In AISTATS, 2012."
+    )
+
+    references = ReferenceSplitter.split_manuscript_references(blob)
+
+    assert len(references) == 4
+    assert references[1].startswith("Jonathan J. Hull")
+    assert "IEEE Conference" in references[2]
+    assert references[3].startswith("Justin Domke")
+
