@@ -182,6 +182,35 @@ def test_documentation_extracts_explicit_hardware_commands_and_system_packages()
     assert "never-return-this" not in repr(result)
 
 
+def test_documentation_extracts_inline_commands_and_dependency_bullets() -> None:
+    result = parse_documentation(
+        """
+        Basic usage
+        --------
+        * Ideal mass-spring: `python3 experiment-spring/train.py --verbose`
+
+        Dependencies
+        --------
+        * OpenAI Gym
+        * PyTorch
+        * NumPy
+        * ImageIO
+        * Scipy
+
+        This project is written in Python 3.
+        """,
+        "README.md",
+    )
+
+    assert result.commands == ["python3 experiment-spring/train.py --verbose"]
+    assert {item.name for item in result.dependencies} == {
+        "gym", "torch", "numpy", "imageio", "scipy"
+    }
+    assert ("python", "3") in {
+        (item.category, item.value) for item in result.evidence
+    }
+
+
 def test_documentation_distinguishes_gpu_memory_from_system_memory() -> None:
     result = parse_documentation(
         "Requires an NVIDIA V100 16GB GPU.\nRequires 64 GB of system RAM.",

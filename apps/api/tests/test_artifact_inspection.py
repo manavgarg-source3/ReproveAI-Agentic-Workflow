@@ -178,6 +178,57 @@ def test_model_family_path_is_relevant_only_to_matching_experiment() -> None:
     assert by_experiment["EXP-D"]["examples/NLU/roberta_large_mnli.sh"] == FileRelevanceStatus.POSSIBLY_RELEVANT
 
 
+def test_repeated_train_basenames_use_full_readme_paths_for_experiment_mapping() -> None:
+    analysis = ResearchAnalysis(
+        paper=PaperMetadata(title="Hamiltonian Neural Networks"),
+        experiments=[
+            Experiment(
+                id="EXP-SPRING", objective="Model an ideal mass-spring system",
+                dataset="Ideal mass-spring", model="Hamiltonian Neural Network (HNN)",
+                metric="Energy MSE",
+            ),
+            Experiment(
+                id="EXP-REAL", objective="Model a real pendulum",
+                dataset="Real pendulum", model="Hamiltonian Neural Network (HNN)",
+                metric="Energy MSE",
+            ),
+        ],
+    )
+    metadata = bert_metadata(
+        readme_excerpt=(
+            "Ideal mass-spring: `python3 experiment-spring/train.py --verbose`\n"
+            "Real pendulum: `python3 experiment-real/train.py --verbose`"
+        ),
+        file_tree=[
+            RepositoryFileMetadata("experiment-spring/data.py"),
+            RepositoryFileMetadata("experiment-spring/train.py"),
+            RepositoryFileMetadata("experiment-pend/train.py"),
+            RepositoryFileMetadata("experiment-real/data.py"),
+            RepositoryFileMetadata("experiment-real/train.py"),
+            RepositoryFileMetadata("hnn.py"),
+        ],
+    )
+
+    result = inspect_artifacts(
+        [code_artifact()], analysis, repository_provider=StubProvider(metadata)
+    )
+    spring = {
+        item.path: item.relevance_status
+        for item in result.files if item.experiment_id == "EXP-SPRING"
+    }
+    real = {
+        item.path: item.relevance_status
+        for item in result.files if item.experiment_id == "EXP-REAL"
+    }
+
+    assert spring["experiment-spring/train.py"] == FileRelevanceStatus.RELEVANT
+    assert spring["experiment-real/train.py"] != FileRelevanceStatus.RELEVANT
+    assert spring["experiment-pend/train.py"] != FileRelevanceStatus.RELEVANT
+    assert real["experiment-real/train.py"] == FileRelevanceStatus.RELEVANT
+    assert real["experiment-spring/train.py"] != FileRelevanceStatus.RELEVANT
+    assert real["experiment-pend/train.py"] != FileRelevanceStatus.RELEVANT
+
+
 def test_generic_method_word_does_not_map_roberta_checkpoint_to_gpt3() -> None:
     analysis = ResearchAnalysis(
         paper=PaperMetadata(title="LoRA"),

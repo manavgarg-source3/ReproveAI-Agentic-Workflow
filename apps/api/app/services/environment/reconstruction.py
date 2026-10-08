@@ -302,6 +302,7 @@ def _reconstruct_scope(
         elif name.startswith("readme") or PurePosixPath(path).suffix.casefold() in {".md", ".rst"}:
             documentation = parse_documentation(content, path)
             environment_evidence.extend(documentation.evidence)
+            dependencies.extend(documentation.dependencies)
             commands.extend(documentation.commands)
             system_dependencies.extend(documentation.system_dependencies)
             variables.extend(_variable(item, path, "export") for item in documentation.environment_variables)
@@ -403,13 +404,10 @@ def _reconstruct_scope(
     )
     blocked = repository.retrieval_status == "BLOCKED" and not meaningful
     missing: list[str] = []
-    # Relaxed for smart inference: don't strictly require these to mark as reconstructed
-    # if not (values["python_version"] or values["python_constraint"]):
-    #     missing.append("Python version or constraint")
-    # if not dependencies:
-    #     missing.append("Package dependencies")
-    # if not (values["operating_system"] or values["container"]):
-    #     missing.append("Operating system or container base image")
+    if not (values["python_version"] or values["python_constraint"]):
+        missing.append("Python version or constraint")
+    if not dependencies:
+        missing.append("Package dependencies")
     if blocked:
         status = EnvironmentStatus.BLOCKED
         confidence = "LOW"

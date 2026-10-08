@@ -93,7 +93,7 @@ def classify_repository_file(path: str) -> tuple[ArtifactFileType, ArtifactFileR
         role = ArtifactFileRole.EVALUATION
     elif re.search(r"infer|predict|demo", searchable):
         role = ArtifactFileRole.INFERENCE
-    elif re.search(r"prepare|dataset|data[_-]?prep", searchable):
+    elif stem == "data" or re.search(r"prepare|dataset|data[_-]?prep", searchable):
         role = ArtifactFileRole.DATA_PREPARATION
     elif re.search(r"model|network|architecture", searchable):
         role = ArtifactFileRole.MODEL_DEFINITION
@@ -126,7 +126,11 @@ def _terms(*values: str | None) -> set[str]:
 def _readme_path_evidence(readme: str | None, path: str) -> list[str]:
     if not readme:
         return []
-    name = PurePosixPath(path).name.casefold()
+    # Basenames such as ``train.py`` are repeated across many experiment
+    # folders. Matching the basename caused the first README command to be
+    # attached to every sibling experiment, so nested files require their
+    # complete repository-relative path.
+    name = PurePosixPath(path).as_posix().casefold()
     evidence: list[str] = []
     lowered = readme.casefold()
     start = 0
@@ -152,11 +156,14 @@ def _classify_relevance(
     experiment: Experiment,
     artifact: Artifact,
     readme: str | None,
+    discriminative_dataset_terms: set[str] | None = None,
 ) -> tuple[FileRelevanceStatus, ArtifactConfidence, list[str]]:
     normalized_path = re.sub(r"[^a-z0-9]+", " ", path.casefold())
     model_terms = _terms(experiment.model) - MODEL_QUALIFIERS
-    specific_terms = _terms(
-        experiment.dataset,
+    dataset_terms = _terms(experiment.dataset)
+    if discriminative_dataset_terms is not None:
+        dataset_terms &= discriminative_dataset_terms
+    specific_terms = dataset_terms | _terms(
         experiment.split,
         experiment.metric,
         experiment.baseline,
@@ -170,6 +177,9 @@ def _classify_relevance(
     readme_evidence = _readme_path_evidence(readme, path)
     readme_text = " ".join(readme_evidence).casefold()
     readme_matches = sorted(term for term in specific_terms if term in readme_text)
+    required_readme_matches = max(
+        1, min(2, len(discriminative_dataset_terms or set()))
+    )
     evidence = [f"Observed repository path: {path}", *readme_evidence]
     ambiguous = artifact.relationship_status in {
         ArtifactStatus.AMBIGUOUS,
@@ -190,7 +200,11 @@ def _classify_relevance(
         term in normalized_path or term in readme_text for term in specialized_terms
     )
 
-    if matched_terms or matched_model_terms or readme_matches:
+    if (
+        matched_terms
+        or matched_model_terms
+        or len(readme_matches) >= required_readme_matches
+    ):
         matched = sorted(set(matched_terms + matched_model_terms + readme_matches))
         evidence.append(f"Repository evidence matches experiment term(s): {', '.join(matched)}.")
         if ambiguous or not specialized_match:
@@ -304,13 +318,28 @@ def inspect_artifacts(
             unique_paths.append(normalized)
 
         for experiment in experiments:
+            distinct_dataset_terms = {
+                value.casefold(): _terms(value)
+                for value in {
+                    item.dataset for item in experiments if item.dataset
+                }
+            }
+            dataset_term_counts: dict[str, int] = {}
+            for terms in distinct_dataset_terms.values():
+                for term in terms:
+                    dataset_term_counts[term] = dataset_term_counts.get(term, 0) + 1
+            discriminative_dataset_terms = {
+                term for term in _terms(experiment.dataset)
+                if dataset_term_counts.get(term, 0) == 1
+            }
             mapped: list[ArtifactFile] = []
             for path in unique_paths:
                 file_type, role = classify_repository_file(path)
                 if file_type == ArtifactFileType.OTHER and role == ArtifactFileRole.UNKNOWN:
                     continue
                 relevance, confidence, evidence = _classify_relevance(
-                    path, role, experiment, artifact, metadata.readme_excerpt
+                    path, role, experiment, artifact, metadata.readme_excerpt,
+                    discriminative_dataset_terms,
                 )
                 documented_evidence = " ".join(evidence).casefold()
                 if role == ArtifactFileRole.ENTRYPOINT and (

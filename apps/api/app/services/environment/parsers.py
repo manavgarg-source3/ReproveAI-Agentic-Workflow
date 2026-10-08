@@ -46,6 +46,7 @@ class DockerfileData:
 @dataclass(frozen=True, slots=True)
 class DocumentationData:
     evidence: list[EnvironmentEvidence] = field(default_factory=list)
+    dependencies: list[EnvironmentDependency] = field(default_factory=list)
     environment_variables: list[str] = field(default_factory=list)
     commands: list[str] = field(default_factory=list)
     system_dependencies: list[str] = field(default_factory=list)
@@ -413,18 +414,57 @@ def parse_dockerfile_system_deps(content: str) -> list[str]:
 
 def parse_documentation(content: str, source_path: str) -> DocumentationData:
     evidence: list[EnvironmentEvidence] = []
+    dependencies: list[EnvironmentDependency] = []
     commands: list[str] = []
     system_dependencies: list[str] = []
     patterns = {
-        "python": r"\bPython\s*(?:version\s*)?(?:==|>=|<=|~=|>|<|is|:)?\s*v?(\d+(?:\.\d+){1,2})",
+        "python": r"\bPython\s*(?:version\s*)?(?:==|>=|<=|~=|>|<|is|:)?\s*v?(\d+(?:\.\d+){0,2})",
         "cuda": r"\bCUDA\s*(?:version\s*)?(?:==|>=|<=|is|:)?\s*v?(\d+(?:\.\d+){1,2})",
         "cudnn": r"\bcuDNN\s*(?:version\s*)?(?:==|>=|<=|is|:)?\s*v?(\d+(?:\.\d+){0,2})",
         "storage": r"\b(\d+(?:\.\d+)?\s*(?:GB|GiB|TB|TiB))\s+(?:of\s+)?(?:disk|storage)",
+    }
+    dependency_section = False
+    dependency_aliases = {
+        "openai gym": "gym",
+        "pytorch": "torch",
+        "scikit learn": "scikit-learn",
+        "scikit-learn": "scikit-learn",
+        "tensorflow": "tensorflow",
+        "numpy": "numpy",
+        "imageio": "imageio",
+        "scipy": "scipy",
+        "pandas": "pandas",
+        "matplotlib": "matplotlib",
+        "jax": "jax",
+        "keras": "keras",
+        "transformers": "transformers",
     }
     for raw_line in content.splitlines():
         line = re.sub(r"\s+", " ", raw_line).strip()
         if not line:
             continue
+        heading = re.sub(r"^[#\s]+|[:\s]+$", "", line).casefold()
+        if heading in {"dependencies", "dependency", "requirements", "prerequisites"}:
+            dependency_section = True
+            continue
+        if dependency_section and re.fullmatch(r"[-=]{3,}", line):
+            continue
+        if dependency_section:
+            bullet = re.match(r"^(?:[-*+]\s+|\d+[.)]\s+)(.+?)\s*$", line)
+            if bullet:
+                candidate = re.sub(r"[`*_]", "", bullet.group(1)).strip()
+                normalized = re.sub(r"\s+", " ", candidate).casefold()
+                package_name = dependency_aliases.get(normalized)
+                dependency = (
+                    _dependency(package_name, None, source_path, line[:300])
+                    if package_name
+                    else parse_requirement_line(candidate, source_path)
+                )
+                if dependency is not None:
+                    dependencies.append(dependency)
+                    continue
+            if re.match(r"^#{1,6}\s+", line):
+                dependency_section = False
         for category, pattern in patterns.items():
             match = re.search(pattern, line, re.IGNORECASE)
             if match:
@@ -497,13 +537,31 @@ def parse_documentation(content: str, source_path: str) -> DocumentationData:
             category="system_dependency", value=package, source_path=source_path,
             evidence=line[:300], certainty=Certainty.EXPLICIT,
         ) for package in packages)
-        clean_line = line.strip("`'\" ")
-        if (
-            clean_line.startswith("$") or re.match(r"(?:python|conda|pip|poetry|make)\s+", clean_line, re.IGNORECASE)
-        ) and "=" not in clean_line and not re.search(r"KEY|TOKEN|SECRET|PASSWORD|PASS|PWD|AUTH", clean_line, re.IGNORECASE):
-            commands.append(clean_line.lstrip("$ "))
+        command_candidates = [line.strip("`'\" ")]
+        command_candidates.extend(
+            value.strip() for value in re.findall(r"`([^`\r\n]+)`", line)
+        )
+        for clean_line in command_candidates:
+            if (
+                (
+                    clean_line.startswith("$")
+                    or re.match(
+                        r"(?:python|python3|conda|pip|poetry|make)\s+",
+                        clean_line,
+                        re.IGNORECASE,
+                    )
+                )
+                and "=" not in clean_line
+                and not re.search(
+                    r"KEY|TOKEN|SECRET|PASSWORD|PASS|PWD|AUTH",
+                    clean_line,
+                    re.IGNORECASE,
+                )
+            ):
+                commands.append(clean_line.lstrip("$ "))
     return DocumentationData(
         evidence=evidence,
+        dependencies=dependencies,
         environment_variables=extract_env_vars(content),
         commands=list(dict.fromkeys(commands)),
         system_dependencies=list(dict.fromkeys(system_dependencies)),

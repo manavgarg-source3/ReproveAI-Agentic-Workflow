@@ -266,6 +266,28 @@ def test_explicit_cuda_and_gpu_are_evidence_backed() -> None:
     assert {item.source_path for item in environment.evidence if item.category in {"cuda", "gpu"}} == {"README.md"}
 
 
+def test_readme_only_environment_can_reconstruct_documented_python_dependencies() -> None:
+    environments, _ = reconstruct(
+        {
+            "README.md": (
+                "Basic usage\n--------\n"
+                "* Ideal mass-spring: `python3 experiment-spring/train.py --verbose`\n\n"
+                "Dependencies\n--------\n* PyTorch\n* NumPy\n* Scipy\n\n"
+                "This project is written in Python 3."
+            ),
+        },
+        [repository_file("README.md")],
+    )
+
+    environment = environments[0]
+    assert environment.status == EnvironmentStatus.RECONSTRUCTED
+    assert environment.python_version == "3"
+    assert {item.name for item in environment.dependencies} == {"torch", "numpy", "scipy"}
+    assert environment.documented_commands == [
+        "python3 experiment-spring/train.py --verbose"
+    ]
+
+
 def test_repository_level_files_create_one_global_environment_and_are_read_once() -> None:
     files = [
         repository_file("requirements.txt", experiment_id="EXP-A"),

@@ -589,15 +589,60 @@ def test_identified_but_unavailable_dataset_blocks_target() -> None:
     assert unavailable_dataset.selected_target.readiness_status == ReproductionPlanStatus.BLOCKED
 
 
-def test_model_with_missing_checkpoint_exposes_requirement() -> None:
+def test_documented_training_entrypoint_is_checkpoint_free() -> None:
     complete, data, model, code, entrypoint = complete_target_inputs()
     missing_checkpoint = select(
         [complete], [code, data, model], [entrypoint], [environment()]
     )
-    assert any(
+    assert not any(
         item.requirement == "checkpoint identity"
         for item in missing_checkpoint.selected_target.missing_requirements
     )
+
+
+def test_documented_synthetic_training_target_can_be_ready_without_external_artifacts() -> None:
+    exp = Experiment(
+        id="EXP-SPRING",
+        objective="Model the dynamics of an ideal mass-spring system",
+        dataset="Ideal mass-spring",
+        split="test",
+        model="Hamiltonian Neural Network (HNN)",
+        metric="Energy MSE",
+        reported_result=3.8416e-4,
+        evidence_locations=["Table 1"],
+    )
+    code = artifact(
+        "ART-CODE", ArtifactType.CODE, name="hamiltonian-nn",
+        experiment_id=None,
+    )
+    files = [
+        repository_file(
+            "experiment-spring/data.py", ArtifactFileRole.DATA_PREPARATION,
+            experiment_id="EXP-SPRING",
+        ),
+        repository_file(
+            "experiment-spring/train.py", ArtifactFileRole.TRAINING,
+            experiment_id="EXP-SPRING",
+        ),
+        repository_file(
+            "hnn.py", ArtifactFileRole.UTILITY,
+            experiment_id="EXP-SPRING",
+        ),
+    ]
+    env = environment(
+        commands=["python3 experiment-spring/train.py --verbose"]
+    ).model_copy(update={"experiment_id": None})
+
+    selection = select(
+        [exp], [code], files, [env], maps=[mapping("EXP-SPRING")]
+    )
+
+    target = selection.selected_target
+    assert target is not None
+    assert target.readiness_status == ReproductionPlanStatus.READY_FOR_EXECUTION
+    assert target.documented_command.command == "python3 experiment-spring/train.py --verbose"
+    assert target.missing_requirements == []
+    assert target.required_inputs == []
 
 
 def test_missing_metric_is_not_eligible() -> None:
