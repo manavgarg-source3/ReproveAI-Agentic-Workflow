@@ -23,7 +23,13 @@ from app.services.artifacts.repository import (
     parse_repository_url,
 )
 
-URL_PATTERN = re.compile(r"(?:https?://|www\.)[^\s<>{}\[\]\"']+", re.IGNORECASE)
+URL_PATTERN = re.compile(
+    r"(?:"
+    r"(?:https?://|www\.)[^\s<>{}\[\]\"']+"
+    r"|(?<![\w./])(?:github|gitlab)\.com/[^\s<>{}\[\]\"']+"
+    r")",
+    re.IGNORECASE,
+)
 TRAILING_URL_PUNCTUATION = ".,;:!?)]}>'\""
 WRAPPED_URL_PATH = re.compile(
     r"[ \t]*\r?\n[ \t]*([A-Za-z0-9][A-Za-z0-9._~!$&'()*+,;=:@%/-]*)"
@@ -53,7 +59,9 @@ class _Candidate:
 
 def normalize_public_url(raw_url: str) -> str:
     value = raw_url.strip().rstrip(TRAILING_URL_PUNCTUATION)
-    if value.casefold().startswith("www."):
+    if re.match(r"^(?:github|gitlab)\.com/", value, re.IGNORECASE):
+        value = f"https://{value}"
+    elif value.casefold().startswith("www."):
         value = f"https://{value}"
     parsed = urllib.parse.urlsplit(value)
     if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:

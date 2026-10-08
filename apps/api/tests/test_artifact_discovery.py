@@ -77,6 +77,20 @@ def test_explicit_github_repository_url_is_discovered_and_verified() -> None:
     assert repo.commit == "abc123"
 
 
+def test_bare_github_repository_extracted_from_pdf_is_discovered() -> None:
+    url = "https://github.com/rtqichen/torchdiffeq"
+    artifacts = discover_artifacts(
+        "We released a PyTorch implementation at github.com/rtqichen/torchdiffeq.",
+        analysis(),
+        repository_provider=StubRepositories({url: repository_record(url)}),
+    )
+
+    repository = next(item for item in artifacts if item.type == ArtifactType.CODE)
+    assert repository.source_url == url
+    assert repository.repository == url
+    assert repository.source == "github"
+
+
 def test_bert_repository_split_across_pdf_lines_remains_a_code_candidate() -> None:
     url = "https://github.com/google-research/bert"
     inaccessible = RepositoryMetadata(
