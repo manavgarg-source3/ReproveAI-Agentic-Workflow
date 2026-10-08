@@ -63,6 +63,25 @@ def test_stdout_pattern_and_unrelated_numbers(tmp_path: Path) -> None:
     assert observed.value == 0.81 and observed.source_type == "EXECUTION_STDOUT"
 
 
+def test_final_metric_without_colon_is_preferred_over_training_steps(tmp_path: Path) -> None:
+    run = record(tmp_path, "{}").model_copy(update={
+        "outputs": (),
+        "stdout": (
+            "step 0, train_loss 8.0e-01, test_loss 7.7e-01\n"
+            "step 2000, train_loss 3.69e-02, test_loss 3.59e-02\n"
+            "Final train loss 3.6928e-02 +/- 1.9128e-03\n"
+            "Final test loss 3.5916e-02 +/- 1.8302e-03\n"
+        ),
+    })
+
+    observed = extract_observed_result(fixture_target("Test loss"), run)
+
+    assert observed.status == ObservedResultStatus.EXTRACTED
+    assert observed.value == 3.5916e-02
+    assert observed.extraction_method == "FINAL_STDOUT_REGEX"
+    assert observed.notes == ["Reported uncertainty: +/- 1.8302e-03"]
+
+
 def test_stdout_duplicate_metric_is_ambiguous(tmp_path: Path) -> None:
     run = record(tmp_path, "{}").model_copy(update={"outputs": (), "stdout": "val_accuracy=0.74\ntest_accuracy=0.76\naccuracy=0.74\naccuracy=0.76\n"})
     observed = extract_observed_result(fixture_target(), run)

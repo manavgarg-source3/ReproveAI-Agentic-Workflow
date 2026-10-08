@@ -67,6 +67,49 @@ def extract_observed_result(target: ReproductionTarget, run: ExecutionRecord) ->
         if len(candidates) > 1:
             return _base(target, run, ObservedResultStatus.AMBIGUOUS, warnings=["Multiple incompatible observations matched the target metric."], evidence="; ".join(item.evidence or "" for item in candidates))
         return candidates[0]
+    # Training programs commonly print one authoritative summary without a
+    # colon (for example, "Final test loss 3.59e-02 +/- 1.83e-03"). Prefer
+    # these final summaries over per-step metrics to avoid false ambiguity.
+    metric_tokens = re.findall(r"[A-Za-z0-9]+", metric)
+    metric_pattern = r"[\s_-]+".join(re.escape(token) for token in metric_tokens)
+    final_candidates: list[ObservedResult] = []
+    if metric_pattern:
+        final_pattern = re.compile(
+            rf"(?i)\bfinal\s+{metric_pattern}\s*(?::|=)?\s*({NUMBER})"
+            rf"(?:\s*(?:\+/-|±)\s*({NUMBER}))?"
+        )
+        for line_number, line in enumerate(run.stdout.splitlines(), start=1):
+            match = final_pattern.search(line)
+            if not match:
+                continue
+            value = _numeric(match.group(1))
+            if value is None:
+                continue
+            uncertainty = match.group(2)
+            final_candidates.append(_base(
+                target,
+                run,
+                ObservedResultStatus.EXTRACTED,
+                value=value,
+                raw_value=match.group(1),
+                source_type="EXECUTION_STDOUT",
+                source_location=f"stdout line {line_number}",
+                extraction_method="FINAL_STDOUT_REGEX",
+                certainty=Certainty.EXPLICIT,
+                confidence=ArtifactConfidence.HIGH,
+                evidence=line,
+                notes=([f"Reported uncertainty: +/- {uncertainty}"] if uncertainty else []),
+            ))
+    if final_candidates:
+        if len(final_candidates) > 1:
+            return _base(
+                target,
+                run,
+                ObservedResultStatus.AMBIGUOUS,
+                warnings=["Multiple final observations matched the target metric in stdout."],
+                evidence="; ".join(item.evidence or "" for item in final_candidates),
+            )
+        return final_candidates[0]
     stdout_candidates: list[ObservedResult] = []
     for line_number, line in enumerate(run.stdout.splitlines(), start=1):
         match = re.search(rf"(?i)(?<![\w]){re.escape(metric)}\s*[:=]\s*({NUMBER})(?![\w])", line)
