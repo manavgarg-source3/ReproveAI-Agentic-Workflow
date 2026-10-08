@@ -405,7 +405,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   log_limit_kb: 256,
   network_policy: "NETWORK_DISABLED",
   gpu_policy: "GPU_DISABLED",
-  container_image: "python:3.12-slim",
+  container_image: "reprove/hnn:1906.01563",
 };
 
 export type ResearchDomain =
@@ -785,4 +785,3 @@ export async function listInvestigations(targetId: string): Promise<DiscrepancyI
   if (!response.ok) throw new Error(apiErrorDetail(body, "The investigations could not be loaded."));
   return body as DiscrepancyInvestigation[];
 }
-

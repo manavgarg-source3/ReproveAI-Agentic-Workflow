@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -93,9 +94,10 @@ class DiagnosticOrchestrator:
             # If unknown, just append or rewrite if it's a simple config (for the test fixture)
             new_content = content + f"\n{plan.proposed_state}\n"
         
-        import os
-        import stat
-        os.chmod(target_file, stat.S_IWRITE)
+        # The immutable baseline snapshot is copied with read-only files. Keep
+        # the diagnostic copy readable while granting owner-write permission;
+        # a write-only file cannot subsequently be hashed and restaged.
+        os.chmod(target_file, target_file.stat().st_mode | stat.S_IWUSR)
         target_file.write_text(new_content, encoding="utf-8")
 
         return ControlledModification(
@@ -226,4 +228,3 @@ class DiagnosticOrchestrator:
                 json.loads(execution.model_dump_json()), execution.status.value, _iso(_now())
             )
             return execution
-

@@ -48,7 +48,20 @@ from app.services.execution.persistence import ExecutionRepository
 
 
 ALLOWED_EXECUTABLES = {"python", "python3"}
-ALLOWED_IMAGES = {"python:3.12-slim"}
+ALLOWED_IMAGES = {
+    "python:3.12-slim",
+    "reprove/hnn:1906.01563",
+}
+TRUSTED_ARGUMENT_OVERRIDES = {
+    "reprove/hnn:1906.01563": {
+        "experiment-spring/train.py": ("--save_dir", "/outputs"),
+        "experiment-pend/train.py": ("--save_dir", "/outputs"),
+        "experiment-2body/train.py": ("--save_dir", "/outputs"),
+        "experiment-3body/train.py": ("--save_dir", "/outputs"),
+        "experiment-pixels/train.py": ("--save_dir", "/outputs"),
+        "experiment-real/train.py": ("--save_dir", "/outputs"),
+    },
+}
 SHELL_META = re.compile(r"(?:&&|\|\||[|;<>`]|\$\(|\r|\n)")
 SECRET_OUTPUT = re.compile(
     r"(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|PASSWORD|SECRET|CREDENTIAL|AUTH)[A-Z0-9_]*)\s*[:=]\s*([^\s,;]+)"
@@ -196,7 +209,10 @@ def validate_policy(policy: ExecutionPolicy) -> None:
         )
 
 
-def parse_allowed_command(target: ReproductionTarget) -> tuple[str, tuple[str, ...]]:
+def parse_allowed_command(
+    target: ReproductionTarget,
+    policy: ExecutionPolicy | None = None,
+) -> tuple[str, tuple[str, ...]]:
     planned = target.documented_command
     if planned is None:
         raise ExecutionRejected(
@@ -237,11 +253,83 @@ def parse_allowed_command(target: ReproductionTarget) -> tuple[str, tuple[str, .
             ExecutionFailureCode.COMMAND_NOT_ALLOWED,
             "Command arguments contain prohibited shell syntax.",
         )
-    return tokens[0].casefold(), tuple(tokens[1:])
+    arguments = list(tokens[1:])
+    if policy is not None:
+        override = TRUSTED_ARGUMENT_OVERRIDES.get(policy.container_image, {}).get(
+            script.as_posix()
+        )
+        if override and "--save_dir" not in arguments:
+            arguments.extend(override)
+    return tokens[0].casefold(), tuple(arguments)
 
 
-def validate_execution_request(*args, **kwargs):
-    pass
+def validate_execution_request(
+    target: ReproductionTarget,
+    approval: ExecutionApproval | None,
+    policy: ExecutionPolicy,
+) -> None:
+    validate_policy(policy)
+    if not target.selected or not target.eligible:
+        raise ExecutionRejected(
+            ExecutionFailureCode.INVALID_TARGET,
+            "Only the selected eligible AI/ML reproduction target may execute.",
+        )
+    if target.readiness_status != ReproductionPlanStatus.READY_FOR_EXECUTION:
+        raise ExecutionRejected(
+            ExecutionFailureCode.INVALID_TARGET,
+            f"Target readiness is {target.readiness_status.value}, not READY_FOR_EXECUTION.",
+        )
+    if not target.experiment_id or not target.code_artifact_id:
+        raise ExecutionRejected(
+            ExecutionFailureCode.INVALID_TARGET,
+            "Experiment or code artifact identity is missing.",
+        )
+    if not target.relevant_files:
+        raise ExecutionRejected(
+            ExecutionFailureCode.INVALID_TARGET,
+            "No validated execution file is associated with the target.",
+        )
+    if target.environment_id is None or target.environment_specification is None:
+        raise ExecutionRejected(
+            ExecutionFailureCode.MISSING_ENVIRONMENT,
+            "The selected target has no linked Step 4 environment.",
+        )
+    if target.missing_requirements:
+        requirements = ", ".join(item.requirement for item in target.missing_requirements)
+        raise ExecutionRejected(
+            ExecutionFailureCode.MISSING_INPUT,
+            f"Critical target requirements remain unresolved: {requirements}",
+        )
+    parse_allowed_command(target, policy)
+    if approval is None or approval.status != ApprovalStatus.APPROVED:
+        raise ExecutionRejected(
+            ExecutionFailureCode.NOT_APPROVED,
+            "Explicit human approval is required before execution.",
+        )
+    now = _utcnow()
+    if approval.revoked_at is not None or (
+        approval.expires_at is not None and approval.expires_at <= now
+    ):
+        raise ExecutionRejected(
+            ExecutionFailureCode.NOT_APPROVED, "Approval is expired or revoked."
+        )
+    if approval.target_id != target.target_id or approval.target_hash != _model_hash(target):
+        raise ExecutionRejected(
+            ExecutionFailureCode.NOT_APPROVED,
+            "Approval does not match the immutable target definition.",
+        )
+    if approval.environment_hash and approval.environment_hash != _model_hash(
+        target.environment_specification
+    ):
+        raise ExecutionRejected(
+            ExecutionFailureCode.NOT_APPROVED,
+            "Approval does not match the environment definition.",
+        )
+    if approval.policy_hash != _model_hash(policy):
+        raise ExecutionRejected(
+            ExecutionFailureCode.NOT_APPROVED,
+            "Approval does not match the requested resource policy.",
+        )
 
 class DockerRunner:
     """Launches only the trusted Docker CLI; research commands stay in the container."""
@@ -414,6 +502,35 @@ class ExecutionService:
             for artifact in artifacts:
                 self.artifacts.setdefault(artifact.artifact_id, artifact)
 
+    def restore_target(self, target_id: str) -> ReproductionTarget:
+        """Restore a target and its artifacts after an API process reload."""
+
+        existing = self.targets.get(target_id)
+        if existing is not None:
+            return existing
+        payload = self.repository.find_research_case_by_target(target_id)
+        if payload is None:
+            raise ExecutionRejected(
+                ExecutionFailureCode.INVALID_TARGET, "Unknown reproduction target."
+            )
+        raw_targets = (payload.get("reproduction_targets") or {}).get(
+            "candidate_targets", []
+        )
+        raw_target = next(
+            (item for item in raw_targets if item.get("target_id") == target_id), None
+        )
+        if raw_target is None:
+            raise ExecutionRejected(
+                ExecutionFailureCode.INVALID_TARGET, "Unknown reproduction target."
+            )
+        target = ReproductionTarget.model_validate(raw_target)
+        artifacts = [Artifact.model_validate(item) for item in payload.get("artifacts", [])]
+        with self._lock:
+            self.targets[target_id] = target
+            for artifact in artifacts:
+                self.artifacts[artifact.artifact_id] = artifact
+        return target
+
     def register_artifact_source(self, target_id: str, source_dir: Path) -> str:
         target = self._target(target_id)
         root = source_dir.resolve(strict=True)
@@ -461,12 +578,173 @@ class ExecutionService:
             size_bytes=record.size_bytes,
         )
 
-    def approve(self, target_id: str, approver: str, policy, *, user_id: str | None = None, role: str = "reproduction_approver", expires_in_seconds: int = 86400):
-        from datetime import datetime, timezone, timedelta
+    def approve(
+        self, target_id: str, approver: str, policy: ExecutionPolicy,
+        *, user_id: str | None = None, role: str = "reproduction_approver",
+        expires_in_seconds: int = 86400
+    ) -> ExecutionApproval:
         target = self._target(target_id)
-        approval = ExecutionApproval(approval_id="APR-DUMMY", target_id=target_id, target_hash="dummy", policy_hash="dummy", environment_hash="dummy", artifact_hash="dummy", approver=approver, approver_role=role, approver_user_id=user_id or approver, created_at=datetime.now(timezone.utc), approved_at=datetime.now(timezone.utc), expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds), status=ApprovalStatus.APPROVED, provenance=("Dummy approval",))
-        self._save_approval(approval)
+        validate_policy(policy)
+        _, arguments = parse_allowed_command(target, policy)
+        if not target.selected or not target.eligible:
+            raise ExecutionRejected(
+                ExecutionFailureCode.INVALID_TARGET,
+                "Only the selected eligible AI/ML target can be approved.",
+            )
+        if target.readiness_status != ReproductionPlanStatus.READY_FOR_EXECUTION:
+            raise ExecutionRejected(
+                ExecutionFailureCode.INVALID_TARGET,
+                "Only a READY_FOR_EXECUTION target can be approved.",
+            )
+        if target.environment_id is None or target.environment_specification is None:
+            raise ExecutionRejected(
+                ExecutionFailureCode.MISSING_ENVIRONMENT,
+                "A linked Step 4 environment is required for approval.",
+            )
+        if target.missing_requirements:
+            raise ExecutionRejected(
+                ExecutionFailureCode.MISSING_INPUT,
+                "Target requirements remain unresolved and cannot be approved.",
+            )
+        registration = self.registrations.get(target_id)
+        if registration is None:
+            raise ExecutionRejected(
+                ExecutionFailureCode.MISSING_INPUT,
+                "No trusted local artifact snapshot source is staged for this target.",
+            )
+        if target.code_artifact_id not in self.artifacts:
+            raise ExecutionRejected(
+                ExecutionFailureCode.INVALID_TARGET,
+                "The selected code artifact identity is not registered.",
+            )
+        entrypoint = registration.source_dir.joinpath(*PurePosixPath(arguments[0]).parts)
+        if not entrypoint.is_file() or entrypoint.is_symlink():
+            raise ExecutionRejected(
+                ExecutionFailureCode.INVALID_TARGET,
+                "The validated execution file does not exist in the staged artifact.",
+            )
+        current_hash = hash_directory(registration.source_dir)
+        if current_hash != registration.planned_hash:
+            raise ExecutionRejected(
+                ExecutionFailureCode.ARTIFACT_CHANGED,
+                "Artifact changed before approval.",
+            )
+        approval = ExecutionApproval(
+            approval_id=f"APR-{uuid4().hex.upper()}",
+            target_id=target_id,
+            approver=approver.strip(),
+            status=ApprovalStatus.APPROVED,
+            approved_at=_utcnow(),
+            target_hash=_model_hash(target),
+            policy_hash=_model_hash(policy),
+            artifact_hash=current_hash,
+            environment_hash=_model_hash(target.environment_specification),
+            approver_user_id=user_id or approver.strip(),
+            approver_role=role,
+            created_at=_utcnow(),
+            expires_at=_utcnow() + timedelta(seconds=expires_in_seconds),
+            provenance=("Authenticated approval context required at API boundary.",),
+        )
+        if not approval.approver:
+            raise ExecutionRejected(
+                ExecutionFailureCode.NOT_APPROVED, "Approver identity cannot be empty."
+            )
+        with self._lock:
+            self.approvals[approval.approval_id] = approval
+        self.repository.put(
+            "approvals", approval.approval_id, target_id,
+            approval.model_dump(mode="json"), approval.status.value,
+            approval.approved_at.isoformat(),
+        )
         return approval
+
+    def revoke(self, approval_id: str) -> None:
+        raw = self.repository.load("approvals", approval_id)
+        approval = ExecutionApproval.model_validate(raw) if raw else None
+        if approval is None:
+            raise ExecutionRejected(ExecutionFailureCode.NOT_APPROVED, "Unknown approval.")
+        revoked = approval.model_copy(
+            update={"status": ApprovalStatus.REVOKED, "revoked_at": _utcnow()}
+        )
+        self.approvals[approval_id] = revoked
+        self.repository.revoke(approval_id, revoked.revoked_at.isoformat())
+
+    def execute(
+        self, target_id: str, approval_id: str, policy: ExecutionPolicy,
+        *, run_id: str | None = None,
+        execution_type: ExecutionType = ExecutionType.ORIGINAL,
+    ) -> ExecutionRecord:
+        started = _utcnow()
+        timer = monotonic()
+        target = self.targets.get(target_id)
+        persisted = self.repository.load("approvals", approval_id)
+        approval = ExecutionApproval.model_validate(persisted) if persisted else None
+        try:
+            if target is None:
+                raise ExecutionRejected(
+                    ExecutionFailureCode.INVALID_TARGET, "Unknown reproduction target."
+                )
+            validate_execution_request(target, approval, policy)
+            registration = self.registrations.get(target_id)
+            if registration is None:
+                staged = self.repository.artifact(target_id)
+                if staged:
+                    registration = ArtifactRegistration(
+                        target_id,
+                        staged["artifact_id"],
+                        Path(staged["source"]),
+                        staged["sha256"],
+                        Path(staged["snapshot_path"]),
+                    )
+                    self.registrations[target_id] = registration
+            if registration is None:
+                raise ExecutionRejected(
+                    ExecutionFailureCode.MISSING_INPUT,
+                    "No trusted artifact source is staged.",
+                )
+            current_hash = (
+                hash_directory(registration.source_dir)
+                if registration.source_dir.exists()
+                else registration.planned_hash
+            )
+            if (
+                current_hash != registration.planned_hash
+                or approval is None
+                or current_hash != approval.artifact_hash
+            ):
+                raise ExecutionRejected(
+                    ExecutionFailureCode.ARTIFACT_CHANGED,
+                    "Artifact hash differs from the approved identity.",
+                )
+            staged_inputs = self._validate_inputs(target, policy)
+            if not self.runner.available():
+                raise ExecutionRejected(
+                    ExecutionFailureCode.SANDBOX_CREATION_FAILED,
+                    "Docker is unavailable; host execution is forbidden.",
+                )
+            record = self._execute_docker(
+                target, approval, policy, registration, staged_inputs, started, timer,
+                run_id=run_id, execution_type=execution_type,
+            )
+        except ExecutionRejected as exc:
+            record = self._blocked_record(
+                target_id, target, approval, policy, started, timer,
+                exc.code, exc.reason, run_id=run_id,
+            )
+        except Exception as exc:
+            record = self._blocked_record(
+                target_id,
+                target,
+                approval,
+                policy,
+                started,
+                timer,
+                ExecutionFailureCode.SANDBOX_CREATION_FAILED,
+                f"Sandbox control failed safely: {type(exc).__name__}",
+                run_id=run_id,
+            )
+        self._append_run(record)
+        return self.get_run(target_id, record.run_id)
 
     def queue(self, target_id: str, approval_id: str, policy: ExecutionPolicy) -> ExecutionRecord:
         target = self._target(target_id)
@@ -595,10 +873,18 @@ class ExecutionService:
         run_id: str | None = None,
         execution_type: ExecutionType = ExecutionType.ORIGINAL,
     ) -> ExecutionRecord:
-        executable, arguments = parse_allowed_command(target)
+        executable, arguments = parse_allowed_command(target, policy)
         run_id = run_id or f"RUN-{uuid4().hex.upper()}"
         container_name = f"reprove-{run_id[4:20].lower()}"
-        with tempfile.TemporaryDirectory(prefix="reprove-step6-") as temp:
+        # Docker Desktop and Colima on macOS expose /Users to the Linux VM but
+        # not necessarily Darwin's /private/var-backed tempfile directory.
+        # Keep ephemeral bind sources in an owner-only, Docker-visible path.
+        sandbox_temp_root = Path.home() / ".reprove" / "sandbox-tmp"
+        sandbox_temp_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(sandbox_temp_root, 0o700)
+        with tempfile.TemporaryDirectory(
+            prefix="reprove-step6-", dir=sandbox_temp_root
+        ) as temp:
             root = Path(temp)
             workspace = root / "workspace"
             input_dir = root / "inputs"

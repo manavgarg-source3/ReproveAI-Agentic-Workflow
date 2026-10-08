@@ -312,6 +312,24 @@ def test_policy_rejects_unapproved_image() -> None:
     assert caught.value.code == ExecutionFailureCode.RESOURCE_POLICY_INVALID
 
 
+def test_hnn_image_routes_training_output_to_writable_output_mount() -> None:
+    fixture_target = target(
+        command="python3 experiment-spring/train.py --verbose"
+    ).model_copy(update={
+        "relevant_files": ["experiment-spring/train.py"],
+    })
+
+    executable, arguments = parse_allowed_command(
+        fixture_target,
+        ExecutionPolicy(container_image="reprove/hnn:1906.01563"),
+    )
+
+    assert executable == "python3"
+    assert arguments == (
+        "experiment-spring/train.py", "--verbose", "--save_dir", "/outputs"
+    )
+
+
 def test_docker_control_never_uses_shell_true() -> None:
     source = inspect.getsource(DockerRunner)
     assert "shell=True" not in source
