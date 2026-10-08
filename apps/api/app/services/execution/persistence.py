@@ -234,7 +234,11 @@ class ExecutionRepository:
 
     def load_comparison(self, target_id: str, run_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
-            row = db.execute("SELECT payload FROM comparisons WHERE target_id=? AND run_id=?", (target_id, run_id)).fetchone()
+            row = db.execute(
+                "SELECT payload FROM comparisons WHERE target_id=? AND run_id=? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (target_id, run_id),
+            ).fetchone()
         return json.loads(row[0]) if row else None
 
     def put_observed_result(self, observed_id: str, target_id: str, run_id: str, payload: dict[str, Any], created_at: str) -> None:
@@ -243,7 +247,11 @@ class ExecutionRepository:
 
     def load_observed_result(self, target_id: str, run_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
-            row = db.execute("SELECT payload FROM observed_results WHERE target_id=? AND run_id=?", (target_id, run_id)).fetchone()
+            row = db.execute(
+                "SELECT payload FROM observed_results WHERE target_id=? AND run_id=? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (target_id, run_id),
+            ).fetchone()
         return json.loads(row[0]) if row else None
 
     def put_investigation(self, investigation_id: str, target_id: str, payload: dict[str, Any], created_at: str) -> None:
@@ -346,6 +354,22 @@ class ExecutionRepository:
             if not row:
                 return None
             return json.loads(row[0])
+
+    def find_research_case_by_target(self, target_id: str) -> dict[str, Any] | None:
+        """Find the newest persisted analysis containing a target identity."""
+
+        with self._lock, self._connect() as db:
+            rows = db.execute(
+                "SELECT payload FROM research_cases ORDER BY created_at DESC"
+            ).fetchall()
+        for row in rows:
+            payload = json.loads(row[0])
+            targets = (payload.get("reproduction_targets") or {}).get(
+                "candidate_targets", []
+            )
+            if any(item.get("target_id") == target_id for item in targets):
+                return payload
+        return None
 
     def put_graph_snapshot(self, graph_snapshot_id: str, research_case_id: str, payload: dict[str, Any], created_at: str) -> None:
         with self._lock, self._connect() as db:

@@ -15,8 +15,10 @@ from app.schemas.execution import (
     ExecuteRequest,
     ExecutionApproval,
     ExecutionRecord,
+    ExecutionStatus,
 )
 from app.services.execution.sandbox import DockerRunner, ExecutionRejected, execution_service
+from app.services.execution.staging import stage_target_repository
 from app.services.execution.extraction import extract_observed_result
 from app.services.execution.comparison import compare_result
 from app.services.execution.investigation import investigate
@@ -33,10 +35,34 @@ from datetime import datetime, timezone
 def _with_observed_result(target_id: str, record: ExecutionRecord, tolerance: float | None = None) -> ExecutionRecord:
     target = execution_service.targets.get(target_id)
     if target is None:
-        return record
+        try:
+            target = execution_service.restore_target(target_id)
+        except ExecutionRejected:
+            return record
     
+    # Queued/running records have no result evidence yet. Persisting an
+    # UNAVAILABLE observation here previously prevented extraction after the
+    # asynchronous worker completed.
+    if record.status not in {
+        ExecutionStatus.COMPLETED,
+        ExecutionStatus.FAILED,
+        ExecutionStatus.BLOCKED,
+        ExecutionStatus.CANCELLED,
+        ExecutionStatus.TIMED_OUT,
+        ExecutionStatus.INTERRUPTED,
+    }:
+        return record
+
     saved_observed = execution_service.repository.load_observed_result(target_id, record.run_id)
-    if saved_observed:
+    incomplete_statuses = {
+        "UNAVAILABLE", "NOT_AVAILABLE", "NOT_FOUND",
+    }
+    should_reextract = bool(
+        record.status == ExecutionStatus.COMPLETED
+        and saved_observed
+        and saved_observed.get("status") in incomplete_statuses
+    )
+    if saved_observed and not should_reextract:
         observed = ObservedResult.model_validate(saved_observed)
     else:
         observed = extract_observed_result(target, record)
@@ -46,7 +72,7 @@ def _with_observed_result(target_id: str, record: ExecutionRecord, tolerance: fl
         )
         
     saved_comparison = execution_service.repository.load_comparison(target_id, record.run_id)
-    if saved_comparison:
+    if saved_comparison and saved_comparison.get("observed_result_id") == observed.observed_result_id:
         comparison_dict = saved_comparison
         # If a tolerance is requested that differs from the persisted one, re-compare, but don't overwrite if it's identical?
         # Actually, "Every comparison referenced by investigation resolves to durable record".
@@ -92,29 +118,58 @@ def _authenticated_principal(authorization: str | None, dev_id: str | None, dev_
     response_model=ExecutionApproval,
     status_code=status.HTTP_201_CREATED,
 )
-def approve_reproduction(target_id: str, request: ApprovalRequest, x_user_id: str | None = Header(default=None), x_user_role: str | None = Header(default=None), authorization: str | None = Header(default=None)) -> ExecutionApproval:
-    from datetime import datetime, timezone, timedelta
-    return ExecutionApproval(approval_id="APR-DUMMY", target_id=target_id, target_hash="dummy", policy_hash="dummy", environment_hash="dummy", artifact_hash="dummy", approver=request.approver, approver_role="reproduction_approver", approver_user_id=request.approver, created_at=datetime.now(timezone.utc), approved_at=datetime.now(timezone.utc), expires_at=datetime.now(timezone.utc) + timedelta(seconds=86400), status="APPROVED", provenance=("Dummy approval",))
+def approve_reproduction(
+    target_id: str,
+    request: ApprovalRequest,
+    x_user_id: str | None = Header(default=None),
+    x_user_role: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> ExecutionApproval:
+    user_id, role = _authenticated_principal(authorization, x_user_id, x_user_role)
+    if role not in {"reproduction_approver", "reviewer", "admin"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Approval role required.")
+    try:
+        execution_service.restore_target(target_id)
+        if target_id not in execution_service.registrations:
+            stage_target_repository(execution_service, target_id)
+        return execution_service.approve(
+            target_id, user_id, request.policy, user_id=user_id, role=role
+        )
+    except ExecutionRejected as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": exc.code.value, "reason": exc.reason},
+        ) from exc
 
 @router.post("/{target_id}/execute", response_model=ExecutionRecord)
 def execute_reproduction(target_id: str, request: ExecuteRequest, asynchronous: bool | None = Query(default=None), tolerance: float | None = Query(default=None, ge=0)) -> ExecutionRecord:
-    from datetime import datetime, timezone
-    from app.schemas.execution import ExecutionStatus, SandboxControls
-    record = ExecutionRecord(run_id="RUN-DUMMY", target_id=target_id, experiment_id="EXP-DUMMY", timestamp_started=datetime.now(timezone.utc), timestamp_finished=datetime.now(timezone.utc), runtime_seconds=1.0, resource_policy=request.policy, sandbox=SandboxControls(cpu_shares=1024, memory_limit_bytes=1024, network_disabled=True, pids_limit=10, timeout_seconds=10), status=ExecutionStatus.COMPLETED, approval_id=request.approval_id, stdout="Smart inference execution bypassed.")
-    return _with_observed_result(target_id, record, tolerance)
+    try:
+        if asynchronous is None:
+            asynchronous = isinstance(execution_service.runner, DockerRunner)
+        record = (
+            execution_service.queue(target_id, request.approval_id, request.policy)
+            if asynchronous
+            else execution_service.execute(target_id, request.approval_id, request.policy)
+        )
+        return _with_observed_result(target_id, record, tolerance)
+    except ExecutionRejected as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": exc.code.value, "reason": exc.reason},
+        ) from exc
 
 @router.get("/{target_id}/runs", response_model=list[ExecutionRecord])
 def list_reproduction_runs(target_id: str, tolerance: float | None = Query(default=None, ge=0)) -> list[ExecutionRecord]:
-    from datetime import datetime, timezone
-    from app.schemas.execution import ExecutionStatus, SandboxControls, ExecutionPolicy
-    record = ExecutionRecord(run_id="RUN-DUMMY", target_id=target_id, experiment_id="EXP-DUMMY", timestamp_started=datetime.now(timezone.utc), timestamp_finished=datetime.now(timezone.utc), runtime_seconds=1.0, resource_policy=ExecutionPolicy(), sandbox=SandboxControls(cpu_shares=1024, memory_limit_bytes=1024, network_disabled=True, pids_limit=10, timeout_seconds=10), status=ExecutionStatus.COMPLETED, stdout="Smart inference execution bypassed.")
-    return [_with_observed_result(target_id, record, tolerance)]
+    return [
+        _with_observed_result(target_id, item, tolerance)
+        for item in execution_service.list_runs(target_id)
+    ]
 
 @router.get("/{target_id}/runs/{run_id}", response_model=ExecutionRecord)
 def get_reproduction_run(target_id: str, run_id: str, tolerance: float | None = Query(default=None, ge=0)) -> ExecutionRecord:
-    from datetime import datetime, timezone
-    from app.schemas.execution import ExecutionStatus, SandboxControls, ExecutionPolicy
-    record = ExecutionRecord(run_id=run_id, target_id=target_id, experiment_id="EXP-DUMMY", timestamp_started=datetime.now(timezone.utc), timestamp_finished=datetime.now(timezone.utc), runtime_seconds=1.0, resource_policy=ExecutionPolicy(), sandbox=SandboxControls(cpu_shares=1024, memory_limit_bytes=1024, network_disabled=True, pids_limit=10, timeout_seconds=10), status=ExecutionStatus.COMPLETED, stdout="Smart inference execution bypassed.")
+    record = execution_service.get_run(target_id, run_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found.")
     return _with_observed_result(target_id, record, tolerance)
 
 @router.post("/{target_id}/runs/{run_id}/cancel", response_model=ExecutionRecord)
